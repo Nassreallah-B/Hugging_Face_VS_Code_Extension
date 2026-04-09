@@ -3258,7 +3258,6 @@ class HFAIRuntime {
         await this.rag.initialize();
         await this.tasks.initialize();
         await this.refreshRuntimeContexts();
-        void this.maybeAutoStartDocker({ reason: 'activation', waitForReady: false });
       })();
     }
     return this.readyPromise;
@@ -5309,6 +5308,8 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let deadlineTimer = null;
+    let response = null;
     const url = new URL(`https://${HF_ROUTER_HOST}${endpoint || HF_CHAT_COMPLETIONS_PATH}`);
 
     // Ensure the model is included in the body
@@ -5318,12 +5319,35 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
     const finishResolve = (value) => {
       if (settled) return;
       settled = true;
+      if (deadlineTimer) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
       resolve(value);
     };
     const finishReject = (error) => {
       if (settled) return;
       settled = true;
+      if (deadlineTimer) {
+        clearTimeout(deadlineTimer);
+        deadlineTimer = null;
+      }
       reject(error);
+    };
+    const failForTimeout = () => {
+      const message = `Hugging Face request timed out after ${requestTimeoutMs}ms.`;
+      setConnectionState(false, message);
+      if (response && typeof response.destroy === 'function') {
+        try {
+          response.destroy(new Error(message));
+        } catch (_) {}
+      }
+      if (typeof req.destroy === 'function') {
+        try {
+          req.destroy(new Error(message));
+        } catch (_) {}
+      }
+      finishReject(new Error(message));
     };
 
     const options = {
@@ -5341,6 +5365,10 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
     };
 
     const req = https.request(options, (res) => {
+      response = res;
+      if (typeof res.setTimeout === 'function') {
+        res.setTimeout(requestTimeoutMs, failForTimeout);
+      }
       if (res.statusCode !== 200) {
         let errorData = '';
         res.on('data', c => errorData += c.toString());
@@ -5414,8 +5442,14 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
         }
         try { finishResolve(JSON.parse(fullText)); } catch (e) { finishReject(e); }
       });
+      res.on('aborted', () => {
+        const message = `Hugging Face closed the response before completion for model "${modelId}".`;
+        setConnectionState(false, message);
+        finishReject(new Error(message));
+      });
     });
 
+    deadlineTimer = setTimeout(failForTimeout, requestTimeoutMs);
     if (typeof requestOptions.onRequestCreated === 'function') {
       requestOptions.onRequestCreated(req);
     }
@@ -5425,10 +5459,7 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
       finishReject(new Error(message));
     });
     req.on('timeout', () => {
-      const message = `Hugging Face request timed out after ${requestTimeoutMs}ms.`;
-      setConnectionState(false, message);
-      req.destroy(new Error(message));
-      finishReject(new Error(message));
+      failForTimeout();
     });
     req.write(payload);
     req.end();
@@ -5690,6 +5721,7 @@ class HFChatViewProvider {
     this._streaming = false;
     this._abortActiveStream = null;
     this._activeForegroundTaskId = '';
+    this._foregroundRunVersion = 0;
     this._responseMetaByChatId = new Map();
   }
 
@@ -5724,6 +5756,7 @@ class HFChatViewProvider {
       },
       instructionStatus: appRuntime.getInstructionStatus(activeChatId),
       responseMeta: activeChatId ? this._getResponseMeta(activeChatId) : null,
+      busy: Boolean(this._streaming),
       connected: isConnected,
       model: getModelId(),
       detail: lastConnectionError
@@ -6017,6 +6050,7 @@ class HFChatViewProvider {
   async _stopActiveConversation(notify = true) {
     const stopStream = this._abortActiveStream;
     const taskId = this._activeForegroundTaskId;
+    this._foregroundRunVersion += 1;
     this._abortActiveStream = null;
     this._activeForegroundTaskId = '';
     this._streaming = false;
@@ -6055,8 +6089,17 @@ class HFChatViewProvider {
     appRuntime.store.appendMessage(activeChat.id, { role: 'user', content: userText });
 
     this._post({ type: 'userMsg', text: userText });
+    let foregroundRunVersion = 0;
+    const isCurrentForegroundRun = () => !background && foregroundRunVersion === this._foregroundRunVersion;
+    if (!background) {
+      this._foregroundRunVersion += 1;
+      foregroundRunVersion = this._foregroundRunVersion;
+      this._streaming = true;
+      this._post({ type: 'thinking' });
+    }
     try {
       await ensureChatBackendReady();
+      if (!background && !isCurrentForegroundRun()) return;
     } catch (err) {
       this._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
       this._post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
@@ -6069,6 +6112,7 @@ class HFChatViewProvider {
     try {
       const editor = vscode.window.activeTextEditor;
       ({ messages } = await appRuntime.buildContext(activeChat.id, userText, includeFile, editor, previousMessages));
+      if (!background && !isCurrentForegroundRun()) return;
     } catch (err) {
       this._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
       this._post({ type: 'error', text: `Context build failed: ${err.message}` });
@@ -6084,35 +6128,14 @@ class HFChatViewProvider {
     }));
     this._logAuditDecision(activeChat.id, this._getResponseMeta(activeChat.id));
     await this.syncState();
+    if (!background && !isCurrentForegroundRun()) return;
 
     if (background) {
       if (!agentEnabled()) {
         this._post({ type: 'error', text: 'Background mode requires autonomous agent mode to be enabled.' });
         return;
       }
-      this._post({ type: 'systemMsg', text: 'Preparing tools and queueing a background task.' });
-      try {
-        const sandboxStatus = await appRuntime.ensureSandboxReady();
-        if (shouldBypassToolsForSandboxStatus(sandboxStatus)) {
-          const fallback = formatSandboxFallbackMessage(sandboxStatus && sandboxStatus.detail);
-          await this._runDirectChatFallback(
-            activeChat,
-            messages,
-            `${describeSandboxBypass(sandboxStatus, fallback)} Background agent mode needs tools.`,
-            { showThinking: false, intentContext }
-          );
-          return;
-        }
-      } catch (err) {
-        const fallback = formatSandboxFallbackMessage(err);
-        await this._runDirectChatFallback(
-          activeChat,
-          messages,
-          `${fallback.userMessage} Background agent mode needs Docker.`,
-          { intentContext }
-        );
-        return;
-      }
+      this._post({ type: 'systemMsg', text: 'Queueing a background agent task.' });
       const task = await appRuntime.tasks.createTaskFromPreparedMessages({
         title: buildChatTitleFromMessage(userText),
         prompt: userText,
@@ -6129,33 +6152,9 @@ class HFChatViewProvider {
       return;
     }
 
-    this._post({ type: 'thinking' });
-    this._streaming = true;
     try {
       if (agentEnabled()) {
-        this._post({ type: 'systemMsg', text: 'Preparing tools and runtime helpers.' });
-        try {
-          const sandboxStatus = await appRuntime.ensureSandboxReady();
-          if (shouldBypassToolsForSandboxStatus(sandboxStatus)) {
-            const fallback = formatSandboxFallbackMessage(sandboxStatus && sandboxStatus.detail);
-            await this._runDirectChatFallback(
-              activeChat,
-              messages,
-              describeSandboxBypass(sandboxStatus, fallback),
-              { showThinking: false, intentContext }
-            );
-            return;
-          }
-        } catch (err) {
-          const fallback = formatSandboxFallbackMessage(err);
-          await this._runDirectChatFallback(
-            activeChat,
-            messages,
-            `${fallback.userMessage} Open Docker Desktop to re-enable tools.`,
-            { showThinking: false, intentContext }
-          );
-          return;
-        }
+        this._post({ type: 'systemMsg', text: 'Preparing autonomous execution.' });
         this._post({ type: 'systemMsg', text: 'Starting autonomous execution.' });
         const preparedTask = await appRuntime.tasks.createTaskFromPreparedMessages({
           title: buildChatTitleFromMessage(userText),
@@ -6165,6 +6164,7 @@ class HFChatViewProvider {
           executionRoot: getWorkspaceFolder() ? getWorkspaceFolder().uri.fsPath : appRuntime.store.workspaceRoot,
           messages
         });
+        if (!isCurrentForegroundRun()) return;
         this._activeForegroundTaskId = preparedTask.id;
         await appRuntime.tasks._startTask(preparedTask.id, {
           onRoundStart: (round, maxRounds) => {
@@ -6192,6 +6192,7 @@ class HFChatViewProvider {
             this._post({ type: 'systemMsg', text: `Patch ready: ${formatPatchSummary(patch.files, patch.summary)}. Accept it to write the files into the workspace.` });
           }
         });
+        if (!isCurrentForegroundRun()) return;
         const completedTaskBeforeDelivery = appRuntime.store.loadTask(preparedTask.id);
         const agentValidation = {
           status: completedTaskBeforeDelivery && completedTaskBeforeDelivery.postValidationStatus ? completedTaskBeforeDelivery.postValidationStatus : 'passed',
@@ -6205,8 +6206,17 @@ class HFChatViewProvider {
         this._logAuditDecision(activeChat.id, agentMeta);
         await appRuntime.tasks.deliverTaskToChat(preparedTask.id);
         const completedTask = appRuntime.store.loadTask(preparedTask.id);
-        const assistantText = completedTask && completedTask.resultText ? completedTask.resultText : '';
-        this._post({ type: 'done', text: assistantText });
+        if (!isCurrentForegroundRun()) return;
+        if (completedTask && completedTask.status === 'completed') {
+          const assistantText = completedTask.resultText || '';
+          this._post({ type: 'done', text: assistantText });
+        } else if (completedTask && completedTask.status === 'failed') {
+          this._post({ type: 'error', text: completedTask.error || 'The agent failed before producing a final answer.' });
+          await this.syncState();
+          return;
+        } else {
+          this._post({ type: 'done', text: '' });
+        }
       } else {
         await this._runDirectChatFallback(activeChat, messages, '', { showThinking: false, intentContext });
         return;
@@ -6214,13 +6224,16 @@ class HFChatViewProvider {
       await appRuntime.maybeCompactChat(activeChat.id);
       await this.syncState();
     } catch (err) {
+      if (!isCurrentForegroundRun() && isUserAbortError(err)) return;
       this._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
       this._post({ type: 'error', text: err.message });
       await this.syncState();
     } finally {
-      this._activeForegroundTaskId = '';
-      this._abortActiveStream = null;
-      this._streaming = false;
+      if (isCurrentForegroundRun()) {
+        this._activeForegroundTaskId = '';
+        this._abortActiveStream = null;
+        this._streaming = false;
+      }
     }
   }
 
@@ -6439,7 +6452,6 @@ function createTestingApi() {
 async function activate(context) {
   extensionContext = context;
   appRuntime = new HFAIRuntime(context);
-  void appRuntime.maybeAutoStartDocker({ reason: 'activate-entry', waitForReady: false });
 
   // Status bar
   statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
