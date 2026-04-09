@@ -2227,6 +2227,7 @@
     let latestRagStatus = null;
     let latestSandboxStatus = null;
     let latestInstructionStatus = null;
+    let latestResponseMeta = null;
     let instructionEditorScope = '';
     let overviewOpen = false;
     let historyOpen = false;
@@ -2266,6 +2267,17 @@
       if (!latestSandboxStatus) {
         return { value: 'Chat', state: 'Checking', meta: 'Checking tool availability.' };
       }
+      if (
+        latestSandboxStatus.autoStart &&
+        latestSandboxStatus.autoStart.launched &&
+        !latestSandboxStatus.dockerReady
+      ) {
+        return {
+          value: 'Starting Docker',
+          state: 'Starting Docker',
+          meta: latestSandboxStatus.detail || 'Docker Desktop launch was requested.'
+        };
+      }
       if (latestSandboxStatus.dockerReady) {
         return {
           value: 'Tools ready',
@@ -2284,6 +2296,20 @@
         value: 'Direct chat',
         state: 'Direct chat',
         meta: latestSandboxStatus.required ? 'Tool mode is unavailable right now.' : 'Direct chat fallback is active.'
+      };
+    }
+
+    function getResponseMetaUiState() {
+      if (!latestResponseMeta) {
+        return { value: 'Off', validation: 'Pending', meta: 'No audit metadata yet.' };
+      }
+      const intentLabel = latestResponseMeta.intent || 'general';
+      const strictLabel = latestResponseMeta.strictAuditMode ? 'Strict' : 'Standard';
+      const validationLabel = latestResponseMeta.postValidationStatus || 'pending';
+      return {
+        value: intentLabel + ' · ' + strictLabel,
+        validation: validationLabel,
+        meta: latestResponseMeta.evidenceSummary || 'No evidence summary available.'
       };
     }
 
@@ -2664,6 +2690,7 @@
       const memoryValue = latestMemoryStatus && latestMemoryStatus.enabled ? 'On' : 'Off';
       const ragValue = latestRagStatus ? latestRagStatus.state : 'Idle';
       const sandboxUi = getSandboxUiState();
+      const responseUi = getResponseMetaUiState();
       const contextValue = latestContextMeta
         ? (latestContextMeta.summaryAvailable ? 'Summary ready' : `${latestContextMeta.recentMessages} recent`)
         : 'Waiting';
@@ -2673,6 +2700,8 @@
         ['Context', contextValue],
         ['RAG', ragValue],
         ['Mode', sandboxUi.value],
+        ['Audit', responseUi.value],
+        ['Validation', responseUi.validation],
         ['Tasks', runningCount ? `${runningCount} active` : taskCount ? `${taskCount} total` : 'None'],
         ['Patch', patchCount ? String(patchCount) : 'None']
       ];
@@ -2713,6 +2742,7 @@
         ? `${latestRagStatus.semanticCoverage}% semantic${latestRagStatus.lastError ? ` · ${latestRagStatus.lastError}` : ''}`
         : 'Index not built yet';
       const sandboxUi = getSandboxUiState();
+      const responseUi = getResponseMetaUiState();
 
       container.innerHTML = `
     <div class="workspace-metrics">
@@ -2735,6 +2765,11 @@
         <span class="workspace-label">Mode</span>
         <span class="workspace-value">${escapeHtml(sandboxUi.state)}</span>
         <span class="workspace-meta">${escapeHtml(sandboxUi.meta)}</span>
+      </div>
+      <div class="workspace-metric">
+        <span class="workspace-label">Audit</span>
+        <span class="workspace-value">${escapeHtml(responseUi.value)}</span>
+        <span class="workspace-meta">${escapeHtml(responseUi.validation)}</span>
       </div>
     </div>`;
       renderStatusStrip();
@@ -2777,6 +2812,11 @@
 
     function renderSandboxStatus(sandboxStatus) {
       latestSandboxStatus = sandboxStatus || null;
+      refreshWorkspaceStatus();
+    }
+
+    function renderResponseMeta(responseMeta) {
+      latestResponseMeta = responseMeta || null;
       refreshWorkspaceStatus();
     }
 
@@ -3129,6 +3169,7 @@
           renderRagStatus(msg.ragStatus);
           renderSandboxStatus(msg.sandboxStatus);
           renderInstructionStatus(msg.instructionStatus);
+          renderResponseMeta(msg.responseMeta);
 
           const dot = $('status-dot');
           const badge = $('model-badge');
