@@ -3233,8 +3233,17 @@
 
         case 'done': {
           if (currentMsgEl) {
-            currentMsgEl.content.innerHTML = parseMarkdown(msg.text || currentChunk);
-            scrollBottom();
+            if (msg.text || currentChunk) {
+              currentMsgEl.content.innerHTML = parseMarkdown(msg.text || currentChunk);
+              scrollBottom();
+            } else {
+              const wrap = currentMsgEl.msg && currentMsgEl.msg.parentElement;
+              if (wrap && wrap.parentElement) {
+                wrap.parentElement.removeChild(wrap);
+              } else if (currentMsgEl.msg && currentMsgEl.msg.remove) {
+                currentMsgEl.msg.remove();
+              }
+            }
             currentMsgEl = null;
             currentChunk = '';
           } else if (msg.text || currentChunk) {

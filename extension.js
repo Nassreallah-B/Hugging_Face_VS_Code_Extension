@@ -1192,6 +1192,53 @@ function buildToolResultBlockForModel(toolCall, resultValue, ok) {
       ].filter(Boolean).join('\n');
     }
 
+    case 'spawn_agent': {
+      const lines = buildAgentToolStatusLines(resultValue);
+      return [
+        'Tool: spawn_agent',
+        ...lines,
+        'Note: this agent runs asynchronously. Use wait_agent or task_output to inspect progress or output.'
+      ].filter(Boolean).join('\n');
+    }
+
+    case 'wait_agent': {
+      const agents = Array.isArray(resultValue && resultValue.agents) ? resultValue.agents : [];
+      const sample = agents.slice(0, 8).map(agent => `- ${agent.name || agent.id || 'agent'}: ${agent.status || 'unknown'}${agent.taskId ? ` (task ${agent.taskId})` : ''}`);
+      return [
+        'Tool: wait_agent',
+        `Waited: ${Number(resultValue && resultValue.waitedMs || 0)}ms`,
+        `Completed: ${Number(resultValue && resultValue.completed || 0)}/${agents.length}`,
+        sample.length ? `Agents:\n${sample.join('\n')}` : 'Agents: none'
+      ].filter(Boolean).join('\n');
+    }
+
+    case 'orchestrate_team':
+    case 'workflow_run': {
+      const team = resultValue && resultValue.team ? resultValue.team : {};
+      const workers = Array.isArray(resultValue && resultValue.workers) ? resultValue.workers : [];
+      const lead = resultValue && resultValue.lead ? resultValue.lead : null;
+      const verifier = resultValue && resultValue.verifier ? resultValue.verifier : null;
+      return [
+        `Tool: ${name}`,
+        team.teamName ? `Team: ${team.teamName}` : '',
+        team.id ? `Team ID: ${team.id}` : '',
+        lead ? buildAgentToolStatusLines(lead).join('\n') : '',
+        workers.length ? `Workers:\n${workers.slice(0, 8).map(worker => `- ${worker.name || worker.id || 'worker'} (${worker.id || 'no-id'})`).join('\n')}` : 'Workers: none',
+        verifier ? `Verifier: ${verifier.name || verifier.id || 'verification'}${verifier.taskId ? ` (task ${verifier.taskId})` : ''}` : 'Verifier: none',
+        'Note: orchestration is asynchronous. Wait for the lead or workers before claiming a verified final audit result.'
+      ].filter(Boolean).join('\n');
+    }
+
+    case 'task_output': {
+      return [
+        'Tool: task_output',
+        resultValue && resultValue.status ? `Status: ${resultValue.status}` : '',
+        resultValue && resultValue.taskId ? `Task ID: ${resultValue.taskId}` : '',
+        resultValue && resultValue.resultText ? `Result excerpt:\n${truncateText(String(resultValue.resultText), MAX_AGENT_TOOL_MODEL_RESULT_CHARS)}` : '',
+        resultValue && resultValue.error ? `Error: ${truncateText(String(resultValue.error), 1600)}` : ''
+      ].filter(Boolean).join('\n');
+    }
+
     default:
       return [
         `Tool: ${name}`,
@@ -1210,6 +1257,49 @@ function buildToolResultsConversationMessage(roundNumber, toolResultBlocks) {
       toolResultBlocks.join('\n\n')
     ].join('\n\n')
   };
+}
+
+function buildAgentToolStatusLines(agent) {
+  if (!agent || typeof agent !== 'object') return [];
+  return [
+    agent.name ? `Agent: ${agent.name}` : '',
+    agent.id ? `Agent ID: ${agent.id}` : '',
+    agent.taskId ? `Task ID: ${agent.taskId}` : '',
+    agent.status ? `Status: ${agent.status}` : '',
+    agent.teamName ? `Team: ${agent.teamName}` : ''
+  ].filter(Boolean);
+}
+
+function buildAsyncOrchestrationFallback(taskResult, intentContext = {}) {
+  const executedTools = Array.isArray(taskResult && taskResult.executedTools) ? taskResult.executedTools : [];
+  const executedNames = executedTools.map(tool => String(tool && tool.name || '')).filter(Boolean);
+  if (!executedNames.some(name => ['orchestrate_team', 'workflow_run', 'spawn_agent'].includes(name))) {
+    return '';
+  }
+
+  const strictAuditMode = Boolean(intentContext && intentContext.strictAuditMode);
+  const uniqueNames = Array.from(new Set(executedNames)).map(name => `\`${name}\``).join(', ');
+  const title = taskResult && taskResult.taskTitle ? taskResult.taskTitle : 'the requested workflow';
+  const orchestrationText = [
+    'The foreground agent launched asynchronous sub-agents but did not return a final synthesis yet.',
+    uniqueNames ? `Executed tools: ${uniqueNames}.` : '',
+    'The spawned agents may still be running in the background, so no verified audit conclusion is available yet.'
+  ].filter(Boolean).join(' ');
+
+  if (strictAuditMode) {
+    return [
+      `Affirmation: ${title} was delegated to asynchronous sub-agents, but no verified audit synthesis is available yet.`,
+      'Verdict: NON-VERIFIED',
+      `Evidence: ${orchestrationText}`,
+      'Commentaire critique: Wait for the spawned agents with `wait_agent`, inspect their outputs with `task_output`, or rerun this request in background mode if you want asynchronous orchestration without blocking the foreground chat.'
+    ].join('\n');
+  }
+
+  return [
+    'Multi-agent orchestration started, but no final synthesized answer is available yet.',
+    orchestrationText,
+    'Wait for the spawned agents with `wait_agent`, inspect outputs with `task_output`, or rerun the request in background mode if you want the orchestration to continue asynchronously.'
+  ].join('\n\n');
 }
 
 function inferTaskWorkflowHints(userText) {
@@ -4193,11 +4283,21 @@ async function runLocalAgentTask(taskManager, taskId, runtimeState, liveHooks = 
       });
       if (liveHooks.onRoundStart) liveHooks.onRoundStart(round, maxRounds);
 
-      const result = await chatWithModel(conversation, null, {
-        stream: false,
-        temperature: cfg('temperature') ?? 0.2,
-        max_tokens: cfg('maxTokens') ?? 4096
-      });
+      if (liveHooks.onModelRequestStart) liveHooks.onModelRequestStart(round, maxRounds);
+
+      let result;
+      try {
+        result = await chatWithModel(conversation, null, {
+          stream: false,
+          temperature: cfg('temperature') ?? 0.2,
+          max_tokens: cfg('maxTokens') ?? 4096,
+          onRequestCreated: (req) => {
+            runtimeState.activeRequest = req;
+          }
+        });
+      } finally {
+        runtimeState.activeRequest = null;
+      }
       runtime.features.recordUsage({
         chatId: task.chatId || '',
         taskId,
@@ -4778,6 +4878,13 @@ class AgentTaskManager {
         currentTask.stopRequested = true;
         return currentTask;
       });
+      if (runningState.activeRequest && typeof runningState.activeRequest.destroy === 'function') {
+        try {
+          runningState.activeRequest.destroy(new Error('Request aborted by user.'));
+        } catch (err) {
+          console.error(`[hf-ai-code] Failed to abort active model request: ${err.message}`);
+        }
+      }
       if (runningState.activeChild && typeof runningState.activeChild.kill === 'function') {
         try { runningState.activeChild.kill(); } catch (err) { console.error(`[hf-ai-code] Failed to kill child process: ${err.message}`); }
       }
@@ -4906,6 +5013,7 @@ class AgentTaskManager {
 
     const runtimeState = {
       stopRequested: false,
+      activeRequest: null,
       activeChild: null,
       rootPath: task.executionRoot || (getWorkspaceFolder() ? getWorkspaceFolder().uri.fsPath : ''),
       priorStatus: task.status
@@ -4937,6 +5045,20 @@ class AgentTaskManager {
           });
           this.runtime.store.appendTaskLog(taskId, `Round ${round}/${maxRounds}`);
           if (liveHooks.onRoundStart) liveHooks.onRoundStart(round, maxRounds);
+          if (chatProvider && chatProvider.syncState) chatProvider.syncState();
+        },
+        onModelRequestStart: (round, maxRounds) => {
+          const message = round === 1
+            ? 'Waiting for the model to plan the first action. Docker stays idle until the first tool call.'
+            : `Waiting for the model to continue round ${round}/${maxRounds}.`;
+          this.runtime.store.appendTaskLog(taskId, message);
+          this.runtime.store.updateTask(taskId, currentTask => {
+            currentTask.progressSummary = round === 1
+              ? 'Planning first action'
+              : `Waiting for model response (round ${round}/${maxRounds})`;
+            return currentTask;
+          });
+          if (liveHooks.onModelRequestStart) liveHooks.onModelRequestStart(round, maxRounds);
           if (chatProvider && chatProvider.syncState) chatProvider.syncState();
         },
         onAssistantNote: (note) => {
@@ -4990,12 +5112,12 @@ class AgentTaskManager {
       }
 
       const { actions, cleanedText } = parseAssistantActions(taskResult.finalText || '');
-      const rawFinalText = cleanedText || taskResult.finalText || '';
       const taskIntentContext = injectIntentFormatInstructions(
         taskResult.conversation || task.messages || [],
         task.prompt || '',
         task.chatId ? this.runtime.getContextMeta(task.chatId) : null
       );
+      const rawFinalText = cleanedText || taskResult.finalText || buildAsyncOrchestrationFallback(taskResult, taskIntentContext);
       const validatedTaskResult = postValidateAssistantResponse(rawFinalText, taskIntentContext);
       const finalText = validatedTaskResult.text;
       let patch = null;
@@ -5186,11 +5308,23 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     const url = new URL(`https://${HF_ROUTER_HOST}${endpoint || HF_CHAT_COMPLETIONS_PATH}`);
 
     // Ensure the model is included in the body
     body.model = modelId;
     const payload = JSON.stringify(body);
+    const requestTimeoutMs = Number(requestOptions.timeoutMs || 120000) || 120000;
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
 
     const options = {
       hostname: url.hostname,
@@ -5203,7 +5337,7 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
         'Authorization': `Bearer ${token}`,
         'Content-Length': Buffer.byteLength(payload)
       },
-      timeout: 120000
+      timeout: requestTimeoutMs
     };
 
     const req = https.request(options, (res) => {
@@ -5217,16 +5351,16 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
             if (errJson.error && errJson.error.includes('currently loading')) {
               const waitTime = errJson.estimated_time || 20;
               vscode.window.showInformationMessage(`Model is loading on Hugging Face. Retrying in ${Math.round(waitTime)}s...`);
-              setTimeout(() => apiRequest(endpoint, body, onChunk, requestOptions).then(resolve).catch(reject), waitTime * 1000);
+              setTimeout(() => apiRequest(endpoint, body, onChunk, requestOptions).then(finishResolve).catch(finishReject), waitTime * 1000);
               return;
             }
             const message = formatApiError(res.statusCode, errorData, modelId);
-            if ([401, 403, 404, 410].includes(res.statusCode)) setConnectionState(false, message);
-            reject(new Error(message));
+            setConnectionState(false, message);
+            finishReject(new Error(message));
           } catch (_) {
             const message = formatApiError(res.statusCode, errorData, modelId);
-            if ([401, 403, 404, 410].includes(res.statusCode)) setConnectionState(false, message);
-            reject(new Error(message));
+            setConnectionState(false, message);
+            finishReject(new Error(message));
           }
         });
         return;
@@ -5275,18 +5409,27 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
       res.on('end', () => {
         if (onChunk && body.stream) {
           if (sseBuffer.trim()) processSseEvent(sseBuffer);
-          resolve(fullText);
+          finishResolve(fullText);
           return;
         }
-        try { resolve(JSON.parse(fullText)); } catch (e) { reject(e); }
+        try { finishResolve(JSON.parse(fullText)); } catch (e) { finishReject(e); }
       });
     });
 
     if (typeof requestOptions.onRequestCreated === 'function') {
       requestOptions.onRequestCreated(req);
     }
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
+    req.on('error', (error) => {
+      const message = formatHfConnectionError(error instanceof Error ? error.message : String(error));
+      setConnectionState(false, message);
+      finishReject(new Error(message));
+    });
+    req.on('timeout', () => {
+      const message = `Hugging Face request timed out after ${requestTimeoutMs}ms.`;
+      setConnectionState(false, message);
+      req.destroy(new Error(message));
+      finishReject(new Error(message));
+    });
     req.write(payload);
     req.end();
   });
@@ -5305,7 +5448,18 @@ async function featureExtractionRequest(inputs) {
   }
 
   return new Promise((resolve, reject) => {
+    let settled = false;
     const encodedModel = modelId.split('/').map(encodeURIComponent).join('/');
+    const finishResolve = (value) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const finishReject = (error) => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
     const options = {
       hostname: HF_ROUTER_HOST,
       port: 443,
@@ -5325,25 +5479,38 @@ async function featureExtractionRequest(inputs) {
       res.on('data', chunk => raw += chunk.toString());
       res.on('end', () => {
         if (res.statusCode !== 200) {
-          reject(new Error(`Embedding API Error (${res.statusCode}): ${extractErrorMessage(raw) || raw}`));
+          const message = `Embedding API Error (${res.statusCode}): ${extractErrorMessage(raw) || raw}`;
+          setConnectionState(false, message);
+          finishReject(new Error(message));
           return;
         }
         try {
-          resolve(JSON.parse(raw));
+          finishResolve(JSON.parse(raw));
         } catch (error) {
-          reject(error);
+          finishReject(error);
         }
       });
     });
 
-    req.on('error', reject);
+    req.on('error', (error) => {
+      const message = formatHfConnectionError(error instanceof Error ? error.message : String(error));
+      setConnectionState(false, message);
+      finishReject(new Error(message));
+    });
     req.on('timeout', () => {
-      req.destroy();
-      reject(new Error('Embedding request timeout'));
+      const message = 'Embedding request timed out while contacting Hugging Face Router.';
+      setConnectionState(false, message);
+      req.destroy(new Error(message));
+      finishReject(new Error(message));
     });
     req.write(payload);
     req.end();
   });
+}
+
+function formatHfConnectionError(detail) {
+  const message = normalizeWhitespace(detail) || 'Unknown connection error.';
+  return `Unable to reach Hugging Face Router: ${message}`;
 }
 
 async function checkConnection() {
@@ -5398,22 +5565,29 @@ async function checkConnection() {
           resolve(false);
         });
       });
-      req.on('error', () => {
-        setConnectionState(false, 'Unable to reach Hugging Face Router. Check your network connection and proxy settings.');
+      req.on('error', (error) => {
+        setConnectionState(false, formatHfConnectionError(error instanceof Error ? error.message : String(error)));
         resolve(false);
       });
       req.on('timeout', () => {
-        req.destroy();
-        setConnectionState(false, 'Timed out while connecting to Hugging Face Router.');
+        const message = 'Timed out while connecting to Hugging Face Router.';
+        req.destroy(new Error(message));
+        setConnectionState(false, message);
         resolve(false);
       });
       req.end();
     });
   } catch (err) {
     console.error(`[hf-ai-code] Connection check failed: ${err.message}`);
-    setConnectionState(false, 'Unexpected error while checking the Hugging Face Router connection.');
+    setConnectionState(false, formatHfConnectionError(err instanceof Error ? err.message : String(err)));
     return false;
   }
+}
+
+async function ensureChatBackendReady() {
+  const connected = await checkConnection();
+  if (connected) return true;
+  throw new Error(`${lastConnectionError || formatHfConnectionError('The router did not answer.')} Check your Hugging Face token, model ID, network, or proxy settings.`);
 }
 
 function updateStatus() {
@@ -5881,6 +6055,14 @@ class HFChatViewProvider {
     appRuntime.store.appendMessage(activeChat.id, { role: 'user', content: userText });
 
     this._post({ type: 'userMsg', text: userText });
+    try {
+      await ensureChatBackendReady();
+    } catch (err) {
+      this._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
+      this._post({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+      await this.syncState();
+      return;
+    }
     this._post({ type: 'systemMsg', text: 'Building context from memory, workspace retrieval, and editor state.' });
 
     let messages;
@@ -5987,6 +6169,14 @@ class HFChatViewProvider {
         await appRuntime.tasks._startTask(preparedTask.id, {
           onRoundStart: (round, maxRounds) => {
             this._post({ type: 'systemMsg', text: `Agent round ${round}/${maxRounds}` });
+          },
+          onModelRequestStart: (round, maxRounds) => {
+            this._post({
+              type: 'systemMsg',
+              text: round === 1
+                ? 'Waiting for the model to plan the first action. Docker will stay idle until the first tool call.'
+                : `Waiting for the model to continue round ${round}/${maxRounds}.`
+            });
           },
           onAssistantNote: (note) => {
             const visibleNote = summarizeAssistantNoteForUi(note);
