@@ -24,6 +24,7 @@
 - Added publication hardening for packaging and secrets hygiene.
 - Added `LICENSE`.
 - Cleaned README packaging issues so `vsce package` now completes.
+- Added [TODO.md](/C:/Serveurs/Hugging_Face_VS_Code_Extension/TODO.md) to track the remaining priorities: secret storage, live-test cleanup, CI, stronger claim validation, broader tests, and a dedicated activity-bar icon.
 - Remaining metadata step:
   - repository URL for `hf-ai-code`
   - homepage URL for `hf-ai-code`
