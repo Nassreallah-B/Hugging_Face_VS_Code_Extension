@@ -211,21 +211,41 @@ function cfg(key) {
   return vscode.workspace.getConfiguration('hfaicode').get(key);
 }
 
-// SecretStorage API Token (securise)
-// Le token est lu depuis SecretStorage en priorite,
-// puis depuis la config legacy pour migration transparente.
-async function getApiToken() {
-  if (extensionContext) {
-    const stored = await extensionContext.secrets.get('hfaicode.apiToken');
-    if (stored) return stored;
+// SecretStorage API Token — cache en mémoire pour usage synchrone partout
+// Le cache est chargé au démarrage de l'extension via loadApiTokenCache()
+// et mis à jour à chaque saveToken / setToken.
+let _apiTokenCache = '';
+
+// Chargement initial depuis SecretStorage (appelé une fois dans activate)
+async function loadApiTokenCache() {
+  try {
+    if (extensionContext) {
+      const stored = await extensionContext.secrets.get('hfaicode.apiToken');
+      if (stored) { _apiTokenCache = stored; return; }
+    }
+    // Fallback legacy config
+    _apiTokenCache = cfg('apiToken') || '';
+  } catch (_) {
+    _apiTokenCache = cfg('apiToken') || '';
   }
-  // Fallback legacy (migration automatique)
-  return cfg('apiToken') || '';
 }
 
-// Synchronous fallback utilise uniquement dans les contextes non-async
-function getApiTokenSync() {
-  return cfg('apiToken') || '';
+// Lecture synchrone du token — utilisée partout dans le code
+function getApiToken() {
+  return _apiTokenCache || cfg('apiToken') || '';
+}
+
+// Écriture sécurisée dans SecretStorage + mise à jour du cache
+async function saveApiTokenSecure(token) {
+  _apiTokenCache = token || '';
+  if (extensionContext) {
+    await extensionContext.secrets.store('hfaicode.apiToken', token || '');
+    // Effacer l'ancienne valeur en clair
+    try {
+      const old = vscode.workspace.getConfiguration('hfaicode').get('apiToken');
+      if (old) await vscode.workspace.getConfiguration('hfaicode').update('apiToken', '', vscode.ConfigurationTarget.Global);
+    } catch (_) {}
+  }
 }
 
 function getModelId() {
@@ -3241,6 +3261,7 @@ class HFAIRuntime {
       dockerfilePath: path.join(context.extensionUri.fsPath, 'sandbox', 'Dockerfile'),
       networkMode: getSandboxNetworkMode(),
       autoBuild: sandboxAutoBuildImage(),
+      autoStartDocker: sandboxAutoStartDocker(),
       keepSandboxes: sandboxRetainOnFailure(),
       maxToolTimeoutMs: getSandboxToolTimeoutMs(),
       containerNamePrefix: 'hfai-sbx'
@@ -5896,19 +5917,7 @@ class HFChatViewProvider {
           case 'copyCode': vscode.env.clipboard.writeText(msg.code); vscode.window.showInformationMessage('Code copied!'); break;
           case 'createFile': await this._createFile(msg.code, msg.language); break;
           case 'saveToken':
-            // Stocker dans SecretStorage (securise) au lieu de la config
-            if (extensionContext) {
-              await extensionContext.secrets.store('hfaicode.apiToken', msg.token || '');
-              // Effacer l'ancien token en clair si present
-              try {
-                const oldToken = vscode.workspace.getConfiguration('hfaicode').get('apiToken');
-                if (oldToken) {
-                  await vscode.workspace.getConfiguration('hfaicode').update('apiToken', '', vscode.ConfigurationTarget.Global);
-                }
-              } catch (_) {}
-            } else {
-              await vscode.workspace.getConfiguration('hfaicode').update('apiToken', msg.token, vscode.ConfigurationTarget.Global);
-            }
+            await saveApiTokenSecure(msg.token || '');
             await this._doCheckConnection();
             break;
           case 'saveModel': {
@@ -6479,6 +6488,8 @@ function createTestingApi() {
 // ── activate ──────────────────────────────────────────────────────────────────
 async function activate(context) {
   extensionContext = context;
+  // Charger le token depuis SecretStorage en premier — doit être fait avant tout
+  await loadApiTokenCache();
   appRuntime = new HFAIRuntime(context);
 
   // Status bar
@@ -6539,7 +6550,7 @@ async function activate(context) {
       if (chatProvider) await chatProvider._doCheckConnection();
     }),
     vscode.commands.registerCommand('hfaicode.setToken', async () => {
-      const currentToken = await getApiToken();
+      const currentToken = getApiToken();
       const token = await vscode.window.showInputBox({
         prompt: 'Enter your Hugging Face API Token (Get one at https://huggingface.co/settings/tokens)',
         placeHolder: 'hf_...',
@@ -6547,11 +6558,7 @@ async function activate(context) {
         value: currentToken
       });
       if (token !== undefined && token !== null) {
-        await extensionContext.secrets.store('hfaicode.apiToken', token);
-        try {
-          const oldCfg = vscode.workspace.getConfiguration('hfaicode');
-          if (oldCfg.get('apiToken')) await oldCfg.update('apiToken', '', vscode.ConfigurationTarget.Global);
-        } catch (_) {}
+        await saveApiTokenSecure(token);
         vscode.window.showInformationMessage('Hugging Face Token saved securely (SecretStorage).');
         await checkConnection();
         if (chatProvider) chatProvider._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
@@ -6651,8 +6658,7 @@ async function activate(context) {
       if (legacyToken && String(legacyToken).trim()) {
         const already = await extensionContext.secrets.get('hfaicode.apiToken');
         if (!already) {
-          await extensionContext.secrets.store('hfaicode.apiToken', String(legacyToken).trim());
-          await vscode.workspace.getConfiguration('hfaicode').update('apiToken', '', vscode.ConfigurationTarget.Global);
+          await saveApiTokenSecure(String(legacyToken).trim());
           vscode.window.showInformationMessage('Token HF migre vers le stockage securise (SecretStorage).');
         }
       }
@@ -6662,7 +6668,7 @@ async function activate(context) {
   // Initial connection check
   setTimeout(async () => {
     await appRuntime.initialize();
-    const hasToken = await getApiToken();
+    const hasToken = getApiToken();
     if (!hasToken) {
       statusBarItem.text = '$(key) HF: No Token';
       statusBarItem.tooltip = 'Click to add Hugging Face API Token';
