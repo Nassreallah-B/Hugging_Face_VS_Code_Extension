@@ -1753,23 +1753,6 @@ async function ensureSandboxExecutionContext(execContext = {}) {
   execContext.sandboxMeta = sandboxMeta;
   return sandboxMeta;
 }
-      task = execContext.runtime.store.loadTask(task.id);
-    }
-  } else {
-    sandboxMeta = await execContext.runtime.sandbox.attach(sandboxMeta);
-    if (task) {
-      execContext.runtime.store.updateTask(task.id, currentTask => {
-        currentTask.sandboxState = sandboxMeta.state || 'ready';
-        currentTask.sandboxContainerName = sandboxMeta.containerName || currentTask.sandboxContainerName;
-        currentTask.containerImage = sandboxMeta.image || currentTask.containerImage;
-        return currentTask;
-      });
-    }
-  }
-
-  execContext.sandboxMeta = sandboxMeta;
-  return sandboxMeta;
-}
 
 async function openWorkspaceDocumentForTool(relativePath, rootPath) {
   const targetPath = resolveWorkspaceToolPath(relativePath, rootPath);
@@ -6261,6 +6244,23 @@ class HFChatViewProvider {
 
     try {
       if (agentEnabled()) {
+        try {
+          const cp = require('child_process');
+          const workspaceRoot = getWorkspaceFolder() ? getWorkspaceFolder().uri.fsPath : null;
+          if (workspaceRoot) {
+            const gitStatus = cp.execSync('git status --porcelain', { cwd: workspaceRoot, encoding: 'utf8', stdio: 'pipe' });
+            if (gitStatus && gitStatus.trim().length > 0) {
+              const answer = await vscode.window.showWarningMessage('ARIA Git Safeguard: Uncommitted changes detected. Create a safe branch before agent execution?', 'Yes', 'No');
+              if (answer === 'Yes') {
+                const branchName = `ARIA-Experiment-${Date.now()}`;
+                cp.execSync(`git checkout -b ${branchName}`, { cwd: workspaceRoot, stdio: 'pipe' });
+                this._post({ type: 'systemMsg', text: `🛡️ Git Safeguard: Switched to safe branch '${branchName}'.` });
+              }
+            }
+          }
+        } catch (e) {
+          // Git not installed or not a repository, silently continue
+        }
         this._post({ type: 'systemMsg', text: 'Preparing autonomous execution.' });
         this._post({ type: 'systemMsg', text: 'Starting autonomous execution.' });
         const preparedTask = await appRuntime.tasks.createTaskFromPreparedMessages({
