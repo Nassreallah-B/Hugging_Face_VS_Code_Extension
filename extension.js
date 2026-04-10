@@ -253,9 +253,13 @@ function getModelId() {
 }
 
 function normalizeModelId(modelId) {
-  const value = String(modelId || '').trim();
+  let value = String(modelId || '').trim();
   if (!value) return DEFAULT_MODEL_ID;
-  return value.includes(':') ? value : `${value}:fastest`;
+  // If we already have a colon (custom provider or already has fastest), use as is
+  if (value.includes(':')) return value;
+  // Don't append fastest to obvious local paths or IPs
+  if (value.startsWith('/') || value.startsWith('./') || /^\d+\.\d+\.\d+\.\d+/.test(value)) return value;
+  return `${value}:fastest`;
 }
 
 function getBaseModelId(modelId) {
@@ -509,6 +513,33 @@ function cloneMessages(messages) {
   return Array.isArray(messages)
     ? messages.map(message => ({ ...message }))
     : [];
+}
+
+/**
+ * Normalizes messages for standard OpenAI-compatible APIs (like HF Router).
+ * Maps internal roles like 'system-msg' to 'system' and filters out unsupported roles.
+ */
+function toApiMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages
+    .filter(msg => msg && typeof msg === 'object')
+    .map(msg => {
+      let role = msg.role;
+      // Map internal UI roles to standard API roles
+      if (role === 'system-msg') role = 'system';
+      if (role === 'thought') role = 'assistant';
+      
+      // Strict filtering: only allow system, user, assistant
+      if (!['system', 'user', 'assistant'].includes(role)) {
+        return null; 
+      }
+      
+      return {
+        role,
+        content: String(msg.content || '')
+      };
+    })
+    .filter(Boolean);
 }
 
 function cloneLogs(logs) {
@@ -1670,10 +1701,15 @@ function parseGitWorktrees(output) {
 }
 
 async function ensureSandboxExecutionContext(execContext = {}) {
-  if (execContext.sandboxMeta) return execContext.sandboxMeta;
+  console.log(`[Extension] ensureSandboxExecutionContext: starting...`);
+  if (execContext.sandboxMeta) {
+    console.log(`[Extension] reuse existing sandbox: ${execContext.sandboxMeta.id}`);
+    return execContext.sandboxMeta;
+  }
   if (!execContext.runtime) {
     throw new Error('Sandbox runtime is unavailable for this task.');
   }
+  console.log(`[Extension] triggering ensureSandboxReady...`);
   await execContext.runtime.ensureSandboxReady();
 
   let task = execContext.taskId ? execContext.runtime.store.loadTask(execContext.taskId) : null;
@@ -1682,23 +1718,29 @@ async function ensureSandboxExecutionContext(execContext = {}) {
     : null;
 
   if (!sandboxMeta) {
+    console.log(`[Extension] No sandbox found for task, creating new one...`);
     const sourceRoot = execContext.rootPath || (getWorkspaceFolder() ? getWorkspaceFolder().uri.fsPath : '');
     if (!sourceRoot) throw new Error('No workspace root is available for sandbox creation.');
     sandboxMeta = await execContext.runtime.sandbox.createFromWorkspace({
       sandboxId: createId('sandbox'),
       sourceRoot
     });
+    console.log(`[Extension] New sandbox created: ${sandboxMeta.id}`);
     if (task) {
       execContext.runtime.store.updateTask(task.id, currentTask => {
         currentTask.sandboxId = sandboxMeta.id;
         currentTask.sandboxState = sandboxMeta.state || 'ready';
-        currentTask.sandboxRootDir = sandboxMeta.rootDir;
-        currentTask.sandboxWorkspaceDir = sandboxMeta.workspaceDir;
-        currentTask.sandboxContainerName = sandboxMeta.containerName;
-        currentTask.containerImage = sandboxMeta.image || getSandboxImage();
         return currentTask;
       });
-      execContext.runtime.store.appendTaskLog(task.id, `Sandbox ready: ${sandboxMeta.id}`);
+    }
+  } else {
+    console.log(`[Extension] Reattaching to existing sandbox: ${sandboxMeta.id}`);
+    await execContext.runtime.sandbox.attach(sandboxMeta);
+  }
+  
+  execContext.sandboxMeta = sandboxMeta;
+  return sandboxMeta;
+}
       task = execContext.runtime.store.loadTask(task.id);
     }
   } else {
@@ -2719,6 +2761,7 @@ class PersistentState {
       lastCompactedMessageCount: 0,
       updatedAt: now
     });
+    console.log(`[Store] Created chat: ${chat.id} (${chat.title})`);
     this.chatIndex.activeChatId = chat.id;
     this.saveChatIndex();
     return chat;
@@ -2759,9 +2802,14 @@ class PersistentState {
   }
 
   selectChat(chatId) {
-    if (!this.chatIndex.chats.some(chat => chat.id === chatId)) return null;
+    console.log(`[Store] selectChat requested: ${chatId}`);
+    if (!this.chatIndex.chats.some(chat => chat.id === chatId)) {
+      console.warn(`[Store] selectChat failed: ${chatId} not found in chats`);
+      return null;
+    }
     this.chatIndex.activeChatId = chatId;
     this.saveChatIndex();
+    console.log(`[Store] activeChatId updated to: ${this.chatIndex.activeChatId}`);
     return this.getActiveChat();
   }
 
@@ -3323,12 +3371,15 @@ class HFAIRuntime {
       detail: ''
     };
 
+    console.log(`[Extension] maybeAutoStartDocker called (reason: ${reason}, waitForReady: ${waitForReady})`);
     if (!sandboxEnabled() || !sandboxAutoStartDocker() || process.platform !== 'win32') {
+      console.log(`[Extension] maybeAutoStartDocker skipped: not enabled or not win32.`);
       return skippedResult;
     }
 
     const initialHealth = await this.sandbox.getHealth(false);
     if (initialHealth.dockerReady) {
+      console.log(`[Extension] maybeAutoStartDocker: Docker is already ready.`);
       const result = {
         attempted: false,
         launched: false,
@@ -3343,6 +3394,7 @@ class HFAIRuntime {
     const now = Date.now();
     const inCooldown = this._lastDockerAutoStartAt && (now - this._lastDockerAutoStartAt) < DOCKER_AUTO_START_COOLDOWN_MS;
     if (inCooldown) {
+      console.log(`[Extension] maybeAutoStartDocker: In cooldown (${Math.round((now - this._lastDockerAutoStartAt) / 1000)}s since last attempt).`);
       const readyHealth = waitForReady ? await this._waitForDockerReady() : null;
       const result = {
         attempted: true,
@@ -5348,6 +5400,10 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
 
     // Ensure the model is included in the body
     body.model = modelId;
+    // Sanitize messages for API
+    if (body.messages) {
+      body.messages = toApiMessages(body.messages);
+    }
     const payload = JSON.stringify(body);
     const requestTimeoutMs = Number(requestOptions.timeoutMs || 120000) || 120000;
     const finishResolve = (value) => {
@@ -5767,6 +5823,7 @@ class HFChatViewProvider {
     await appRuntime.initialize();
     const snapshot = appRuntime.store.getUiSnapshot();
     const activeChatId = snapshot.activeChatId;
+    console.log(`[Extension] syncState: sending activeChatId=${activeChatId}, messages=${snapshot.messages.length}`);
     const contextMeta = activeChatId ? appRuntime.getContextMeta(activeChatId) : null;
     const sandboxStatus = await appRuntime.getSandboxStatus();
     const featureSnapshot = appRuntime.features.getSnapshot();
@@ -5827,6 +5884,7 @@ class HFChatViewProvider {
             await this.syncState();
             break;
           case 'selectChat':
+            console.log(`[Extension] Received selectChat: ${msg.chatId}`);
             appRuntime.store.selectChat(msg.chatId);
             await this.syncState();
             break;
