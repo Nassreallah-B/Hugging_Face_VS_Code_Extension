@@ -211,7 +211,20 @@ function cfg(key) {
   return vscode.workspace.getConfiguration('hfaicode').get(key);
 }
 
-function getApiToken() {
+// SecretStorage API Token (securise)
+// Le token est lu depuis SecretStorage en priorite,
+// puis depuis la config legacy pour migration transparente.
+async function getApiToken() {
+  if (extensionContext) {
+    const stored = await extensionContext.secrets.get('hfaicode.apiToken');
+    if (stored) return stored;
+  }
+  // Fallback legacy (migration automatique)
+  return cfg('apiToken') || '';
+}
+
+// Synchronous fallback utilise uniquement dans les contextes non-async
+function getApiTokenSync() {
   return cfg('apiToken') || '';
 }
 
@@ -5405,8 +5418,11 @@ async function apiRequest(endpoint, body, onChunk, requestOptions = {}) {
           .map(line => line.slice(5).trimStart())
           .join('\n')
           .trim();
-
-        if (!dataPayload || dataPayload === '[DONE]') return;
+        if (!dataPayload) return;
+        if (dataPayload === '[DONE]') {
+          if (typeof finishResolve === 'function') finishResolve(fullText);
+          return;
+        }
 
         try {
           const json = JSON.parse(dataPayload);
@@ -5880,7 +5896,19 @@ class HFChatViewProvider {
           case 'copyCode': vscode.env.clipboard.writeText(msg.code); vscode.window.showInformationMessage('Code copied!'); break;
           case 'createFile': await this._createFile(msg.code, msg.language); break;
           case 'saveToken':
-            await vscode.workspace.getConfiguration('hfaicode').update('apiToken', msg.token, vscode.ConfigurationTarget.Global);
+            // Stocker dans SecretStorage (securise) au lieu de la config
+            if (extensionContext) {
+              await extensionContext.secrets.store('hfaicode.apiToken', msg.token || '');
+              // Effacer l'ancien token en clair si present
+              try {
+                const oldToken = vscode.workspace.getConfiguration('hfaicode').get('apiToken');
+                if (oldToken) {
+                  await vscode.workspace.getConfiguration('hfaicode').update('apiToken', '', vscode.ConfigurationTarget.Global);
+                }
+              } catch (_) {}
+            } else {
+              await vscode.workspace.getConfiguration('hfaicode').update('apiToken', msg.token, vscode.ConfigurationTarget.Global);
+            }
             await this._doCheckConnection();
             break;
           case 'saveModel': {
@@ -6511,17 +6539,74 @@ async function activate(context) {
       if (chatProvider) await chatProvider._doCheckConnection();
     }),
     vscode.commands.registerCommand('hfaicode.setToken', async () => {
+      const currentToken = await getApiToken();
       const token = await vscode.window.showInputBox({
         prompt: 'Enter your Hugging Face API Token (Get one at https://huggingface.co/settings/tokens)',
         placeHolder: 'hf_...',
         password: true,
-        value: getApiToken()
+        value: currentToken
       });
-      if (token) {
-        await vscode.workspace.getConfiguration('hfaicode').update('apiToken', token, vscode.ConfigurationTarget.Global);
-        vscode.window.showInformationMessage('Hugging Face Token saved!');
+      if (token !== undefined && token !== null) {
+        await extensionContext.secrets.store('hfaicode.apiToken', token);
+        try {
+          const oldCfg = vscode.workspace.getConfiguration('hfaicode');
+          if (oldCfg.get('apiToken')) await oldCfg.update('apiToken', '', vscode.ConfigurationTarget.Global);
+        } catch (_) {}
+        vscode.window.showInformationMessage('Hugging Face Token saved securely (SecretStorage).');
         await checkConnection();
         if (chatProvider) chatProvider._post({ type: 'status', connected: isConnected, model: getModelId(), detail: lastConnectionError });
+      }
+    }),
+    vscode.commands.registerCommand('hfaicode.cleanSandboxes', async () => {
+      try {
+        await appRuntime.initialize();
+        const sandboxesDir = path.join(appRuntime.store.storageRoot, SANDBOXES_DIR);
+        if (!fs.existsSync(sandboxesDir)) {
+          vscode.window.showInformationMessage('No sandbox directory found.');
+          return;
+        }
+        const entries = fs.readdirSync(sandboxesDir);
+        let removed = 0;
+        for (const entry of entries) {
+          try { fs.rmSync(path.join(sandboxesDir, entry), { recursive: true, force: true }); removed++; } catch (_) {}
+        }
+        vscode.window.showInformationMessage(`Cleaned ${removed} sandbox workspace(s).`);
+        if (chatProvider) await chatProvider.syncState();
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to clean sandboxes: ${err.message}`);
+      }
+    }),
+    vscode.commands.registerCommand('hfaicode.createAgentsMd', async () => {
+      const folders = vscode.workspace.workspaceFolders;
+      if (!folders || folders.length === 0) { vscode.window.showWarningMessage('No workspace folder open.'); return; }
+      const rootPath = folders[0].uri.fsPath;
+      const agentsMdPath = path.join(rootPath, 'AGENTS.md');
+      if (fs.existsSync(agentsMdPath)) {
+        const choice = await vscode.window.showQuickPick(['Yes, overwrite', 'No, open existing'], { placeHolder: 'AGENTS.md already exists.' });
+        if (!choice || choice.startsWith('No')) { vscode.window.showTextDocument(vscode.Uri.file(agentsMdPath)); return; }
+      }
+      let pkgInfo = {};
+      try { pkgInfo = JSON.parse(fs.readFileSync(path.join(rootPath, 'package.json'), 'utf8')); } catch (_) {}
+      const projectName = pkgInfo.name || path.basename(rootPath);
+      const deps = pkgInfo.dependencies ? Object.keys(pkgInfo.dependencies).slice(0, 8).map(d => `- ${d}`).join('\n') : '- (a renseigner)';
+      const scripts = pkgInfo.scripts ? Object.entries(pkgInfo.scripts).slice(0, 5).map(([k,v]) => `- ${k}: \`${v}\``).join('\n') : '- build: npm run build\n- test: npm test';
+      const template = `# Instructions Agents IA — ${projectName}\n\n> ${pkgInfo.description || 'Configuration des agents HF AI Code pour ce projet.'}\n\n## Stack Technique\n${deps}\n\n## Conventions de Code\n- Documenter les fonctions publiques\n- Tests obligatoires pour les fonctions critiques\n- Ne jamais supprimer sans confirmation\n\n## Zones Sensibles\n- Ne pas modifier les fichiers de config production directement\n\n## Commandes Utiles\n${scripts}\n\n## Notes pour les Agents\n- (Ajoutez ici toute information importante)\n`;
+      fs.writeFileSync(agentsMdPath, template, 'utf8');
+      const doc = await vscode.workspace.openTextDocument(agentsMdPath);
+      await vscode.window.showTextDocument(doc);
+      vscode.window.showInformationMessage('AGENTS.md cree. Personnalisez-le pour vos agents IA.');
+    }),
+    vscode.commands.registerCommand('hfaicode.viewMemory', async () => {
+      try {
+        await appRuntime.initialize();
+        const globalNotes = appRuntime.store.getAllMemoryNotes ? appRuntime.store.getAllMemoryNotes('global') : [];
+        const wsNotes = appRuntime.store.getAllMemoryNotes ? appRuntime.store.getAllMemoryNotes('workspace') : [];
+        const all = [...globalNotes.map(n => `[Global][${n.kind||'note'}] ${n.content}`), ...wsNotes.map(n => `[Workspace][${n.kind||'note'}] ${n.content}`)];
+        const content = all.length ? all.join('\n\n') : '(No memory notes yet. Notes accumulate after conversations.)';
+        const doc = await vscode.workspace.openTextDocument({ content: `# HF AI Code Memory Notes\n\n${content}`, language: 'markdown' });
+        await vscode.window.showTextDocument(doc, { preview: true });
+      } catch (err) {
+        vscode.window.showErrorMessage(`Failed to load memory: ${err.message}`);
       }
     }),
     vscode.commands.registerCommand('hfaicode.acceptDiff', async () => {
@@ -6559,10 +6644,25 @@ async function activate(context) {
 
   await vscode.commands.executeCommand('setContext', 'hfaicode.viewingDiff', false);
 
+  // Migration one-shot: transferer le token legacy vers SecretStorage
+  setTimeout(async () => {
+    try {
+      const legacyToken = vscode.workspace.getConfiguration('hfaicode').get('apiToken');
+      if (legacyToken && String(legacyToken).trim()) {
+        const already = await extensionContext.secrets.get('hfaicode.apiToken');
+        if (!already) {
+          await extensionContext.secrets.store('hfaicode.apiToken', String(legacyToken).trim());
+          await vscode.workspace.getConfiguration('hfaicode').update('apiToken', '', vscode.ConfigurationTarget.Global);
+          vscode.window.showInformationMessage('Token HF migre vers le stockage securise (SecretStorage).');
+        }
+      }
+    } catch (_) {}
+  }, 500);
+
   // Initial connection check
   setTimeout(async () => {
     await appRuntime.initialize();
-    const hasToken = getApiToken();
+    const hasToken = await getApiToken();
     if (!hasToken) {
       statusBarItem.text = '$(key) HF: No Token';
       statusBarItem.tooltip = 'Click to add Hugging Face API Token';
@@ -6570,7 +6670,7 @@ async function activate(context) {
       return;
     }
     await checkConnection();
-  }, 1000);
+  }, 1200);
 
   // Periodic connection check every 60s
   const intervalId = setInterval(async () => {

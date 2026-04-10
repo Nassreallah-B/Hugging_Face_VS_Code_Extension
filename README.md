@@ -1,148 +1,223 @@
-# HF AI Code
+# HF AI Code — Hugging Face
 
-HF AI Code est une extension VS Code orientee agent de code, branchée sur Hugging Face Inference Providers. Elle combine chat persistant, mémoire durable, RAG workspace, tâches agent, sandbox Docker, patch review et exécution cloud optionnelle.
+> Extension VS Code d'assistance au codage alimentée par Hugging Face Inference Providers.
+> Architecture agentic distribuée avec agents autonomes, sandbox Docker, mémoire persistante, RAG hybride et exécuteur cloud.
 
-## Ce que fait l'extension
+---
 
-- ouvre un chat persistant par workspace, avec historique sauvegardé sur disque
-- construit le contexte à partir des instructions, de la mémoire, du résumé, du fichier actif et du retrieval
-- peut répondre en chat direct ou en mode agent multi-étapes
-- exécute les outils agent dans un sandbox Docker au lieu du workspace hôte
-- produit un patch à relire avant toute écriture réelle dans le projet
-- peut déléguer des tâches longues au cloud executor
+## ✨ Fonctionnalités Clés
 
-## Architecture rapide
+### 🤖 Agent Autonome Multi-Rounds
+- **Agent foreground** : traite les messages normaux avec outils autonomes (lecture/écriture fichiers, shell, git, web)
+- **Agent background local** : tâche persistante avec checkpoints, survie aux redémarrages VS Code
+- **Agent background distant** : exécution via `cloud-executor` (serveur Node.js séparé)
+- **Sub-agents et équipes** : spawn, orchestration, teams avec lead + workers + verifier
 
-- `extension.js` : point d’entrée principal, orchestration, stockage, chat, agent runtime, RAG, UI bridge
-- `media/` : webview du chat
-- `lib/` : sandbox Docker et helpers runtime partagés
-- `cloud-executor/` : serveur optionnel pour les tâches distantes
-- `sandbox/` : image Docker utilisée par les outils agent
-- `docs/` : documentation d’architecture, protocoles, tests et usage
-- `scripts/` : smoke tests et live tests
-- `test/` : scénarios de test côté extension host
+### 🐳 Sandbox Docker Isolé
+- Toutes les opérations fichiers/shell exécutées dans un container Docker isolé
+- Le workspace hôte n'est JAMAIS modifié directement — seule la revue de patch autorise les changements
+- Image auto-buildée depuis `sandbox/Dockerfile`
+- Modes réseau : `none` (défaut, offline total) ou `bridge`
 
-## Installation
+### 🧠 Mémoire Persistante & RAG
+- Rolling summaries des conversations longues
+- Notes de mémoire globales (préférences) et workspace (conventions projet)
+- RAG hybride : lexical + sémantique via embeddings Hugging Face
+- Auto-indexation du workspace avec refresh configurable
 
-### Installation utilisateur
+### ☁️ Cloud Executor
+- Serveur autonome `cloud-executor/server.js`
+- API REST pour gérer les tâches distantes
+- Persistance sur disque, reprise après redémarrage
+- Déployable en Docker via `docker-compose.yml`
 
-1. Installer l’extension dans VS Code.
-2. Ouvrir les paramètres `HF AI Code`.
-3. Renseigner `hfaicode.apiToken`.
-4. Choisir un `hfaicode.modelId` compatible chat.
-5. Recharger VS Code si nécessaire.
+---
 
-### Installation développeur
+## 🚀 Installation & Configuration
 
-1. Cloner le repo.
-2. Ouvrir le dossier dans VS Code.
-3. Installer les dépendances si nécessaire.
-4. Lancer l’extension en mode développement via l’host VS Code.
-5. Vérifier les prérequis Docker si le mode agent doit utiliser les outils.
+### Prérequis
+- VS Code 1.94+
+- Docker Desktop (pour le sandbox)
+- Token Hugging Face (https://huggingface.co/settings/tokens)
 
-## Prérequis
+### Configuration Rapide
 
-### Obligatoires
+```jsonc
+// .vscode/settings.json
+{
+  "hfaicode.modelId": "Qwen/Qwen3.5-397B-A17B:fastest",
+  "hfaicode.temperature": 0.2,
+  "hfaicode.maxTokens": 8192,
 
-- VS Code `^1.94.0`
-- un token Hugging Face avec accès aux Inference Providers
-- un modèle chat disponible via `router.huggingface.co`
+  // Mémoire
+  "hfaicode.memory.enabled": true,
+  "hfaicode.memory.scope": "global+workspace",
+  "hfaicode.memory.maxRecentMessages": 20,
 
-### Pour le mode agent avec outils
+  // RAG
+  "hfaicode.rag.enabled": true,
+  "hfaicode.rag.mode": "hybrid-local",
+  "hfaicode.rag.topK": 10,
+  "hfaicode.rag.autoRefreshIntervalMinutes": 15,
 
-- Docker Desktop avec moteur Linux actif
-- WSL2 sur Windows
-- image construite depuis `sandbox/Dockerfile`
+  // Agent
+  "hfaicode.agent.enabled": true,
+  "hfaicode.agent.maxRounds": 20,
+  "hfaicode.agent.allowShell": true,
+  "hfaicode.agent.shellTimeoutMs": 60000,
+  "hfaicode.agent.maxConcurrentTasks": 4,
 
-### Pour le cloud executor
+  // Sandbox Docker
+  "hfaicode.sandbox.enabled": true,
+  "hfaicode.sandbox.autoStartDocker": true,
+  "hfaicode.sandbox.image": "hf-ai-code-sandbox:latest",
+  "hfaicode.sandbox.autoBuildImage": true,
+  "hfaicode.sandbox.networkMode": "none",
+  "hfaicode.sandbox.toolTimeoutMs": 180000,
+  "hfaicode.sandbox.retainOnFailure": true
+}
+```
 
-- un serveur Node capable de lancer `cloud-executor/server.js`
-- `HF_API_TOKEN` disponible côté serveur ou forwarding volontaire du token
+### Configurer le Token
+Utilisez la commande `HF AI: Set API Token` (Ctrl+Shift+P) — le token est stocké de façon sécurisée dans VS Code SecretStorage.
 
-## Réglages importants
+---
 
-### Cœur
+## 🛠️ Commandes Disponibles
 
-- `hfaicode.apiToken`
-- `hfaicode.modelId`
-- `hfaicode.temperature`
-- `hfaicode.maxTokens`
-- `hfaicode.sendFileContext`
+| Commande | Description |
+|---|---|
+| `HF AI: Open Chat` | Ouvrir le panneau de chat |
+| `HF AI: New Conversation` | Démarrer une nouvelle conversation |
+| `HF AI: Select / Change Model` | Changer le modèle Hugging Face |
+| `HF AI: Set API Token` | Définir le token (stockage sécurisé SecretStorage) |
+| `HF AI: Check API Connection` | Vérifier la connexion |
+| `HF AI: Explain Code` | Expliquer le code sélectionné |
+| `HF AI: Fix Code / Errors` | Corriger le code sélectionné |
+| `HF AI: Refactor Code` | Refactoriser le code sélectionné |
+| `HF AI: Generate Unit Tests` | Générer des tests unitaires |
+| `HF AI: Optimize Code` | Optimiser le code sélectionné |
+| `HF AI: Add Comments & Docs` | Ajouter des commentaires |
+| `HF AI: Accept Pending Patch` | Appliquer le patch en attente |
+| `HF AI: Reject Pending Patch` | Rejeter le patch en attente |
+| `HF AI: Review Pending Patch` | Ouvrir la revue du patch |
+| `HF AI: Clean Sandbox Workspaces` | Nettoyer les workspaces sandbox |
+| `HF AI: Create AGENTS.md` | Créer un fichier d'instructions agents |
+| `HF AI: View Memory Notes` | Voir les notes mémorisées |
 
-### Mémoire et retrieval
+---
 
-- `hfaicode.memory.enabled`
-- `hfaicode.memory.scope`
-- `hfaicode.rag.enabled`
-- `hfaicode.rag.mode`
-- `hfaicode.rag.embeddingModel`
-- `hfaicode.rag.embeddingMaxRetries`
-- `hfaicode.rag.autoRefreshIntervalMinutes`
+## 🏗️ Architecture
 
-### Agent et sandbox
+```
+extension.js                  ← Noyau principal (6700+ lignes)
+lib/
+  dockerSandbox.js            ← Gestionnaire Docker (sandbox lifecycle)
+  runtimeFeatures.js          ← Sub-agents, teams, hooks, MCP-like, coûts
+  antiHallucination.js        ← Validation post-génération
+cloud-executor/
+  server.js                   ← Serveur HTTP d'exécution distante
+  Dockerfile                  ← Image du cloud executor
+  docker-compose.yml          ← Déploiement cloud executor
+  .env.example                ← Variables d'environnement
+sandbox/
+  Dockerfile                  ← Image sandbox Node.js 22 + outils
+scripts/
+  build-sandbox.js            ← Build de l'image sandbox
+  run-cloud-executor-smoke.js ← Tests de l'executor
+  run-anti-hallucination-checks.js
+test/
+  antiHallucination.test.js   ← Tests unitaires antiHallucination
+  agent-orchestration.test.js ← Tests orchestration multi-agents
+docs/
+  ADVANCED_AGENT_RUNTIME.md   ← Runtime avancé (sub-agents, teams, hooks)
+  AGENTS_AND_SANDBOXES.md     ← Sandbox et cycle de vie agents
+  ARCHITECTURE_MEMORY_RAG.md  ← Mémoire et RAG
+  CLOUD_EXECUTOR.md           ← Cloud executor
+  SCHEMAS_AND_PROTOCOLS.md    ← Schemas et protocoles
+```
 
-- `hfaicode.agent.enabled`
-- `hfaicode.agent.maxRounds`
-- `hfaicode.agent.allowShell`
-- `hfaicode.sandbox.enabled`
-- `hfaicode.sandbox.runtimeRequired`
-- `hfaicode.sandbox.image`
-- `hfaicode.sandbox.toolTimeoutMs`
+---
 
-### Cloud
+## 🐳 Build & Déploiement Sandbox
 
-- `hfaicode.cloud.enabled`
-- `hfaicode.cloud.executorUrl`
-- `hfaicode.cloud.apiKey`
-- `hfaicode.cloud.pollIntervalMs`
+```powershell
+# Build de l'image sandbox
+node scripts/build-sandbox.js
 
-## Fonctionnement
+# Rebuild forcé
+node scripts/build-sandbox.js --force
 
-### Chat
+# Tag custom
+node scripts/build-sandbox.js --tag mon-sandbox:v2
+```
 
-Le message utilisateur arrive dans `extension.js`, le contexte est reconstruit, puis la requête part soit en chat direct, soit dans la boucle agent. L’état du chat est persisté sur disque.
+---
 
-### RAG
+## ☁️ Déploiement Cloud Executor
 
-Le workspace est découpé en chunks. Le retrieval lexical et sémantique injecte les snippets les plus utiles dans le prompt final.
+```powershell
+# 1. Copier .env.example
+cp cloud-executor/.env.example cloud-executor/.env
 
-### Agent
+# 2. Renseigner HF_API_TOKEN et CLOUD_EXECUTOR_API_KEY
+notepad cloud-executor/.env
 
-L’agent peut demander des outils comme lecture fichier, recherche texte, shell, web ou LSP. Les outils sont exécutés dans le sandbox Docker. Les modifications sont transformées en patch review au lieu d’être appliquées directement au workspace.
+# 3. Lancer avec Docker Compose
+cd cloud-executor
+docker compose up -d
 
-### Patch review
+# 4. Configurer dans VS Code
+# hfaicode.cloud.enabled = true
+# hfaicode.cloud.executorUrl = http://127.0.0.1:7788
+# hfaicode.cloud.apiKey = <votre clé>
+```
 
-Quand l’agent modifie des fichiers, l’extension crée un patch en attente. L’utilisateur peut le relire, l’accepter ou le rejeter.
+---
 
-### Cloud executor
+## 🧪 Tests
 
-Les tâches longues peuvent être envoyées à `cloud-executor/server.js`. Le serveur recrée le snapshot du workspace, lance le sandbox, exécute les rounds agent et stocke checkpoints, logs et résultats.
+```powershell
+# Tests anti-hallucination
+npm run test:anti-hallucination
 
-## Commandes utiles
+# Test smoke cloud executor
+npm run test:cloud-smoke
 
-- `hfaicode.openChat`
-- `hfaicode.newChat`
-- `hfaicode.selectModel`
-- `hfaicode.checkConnection`
-- `hfaicode.reviewDiff`
-- `hfaicode.acceptDiff`
-- `hfaicode.rejectDiff`
+# Tests orchestration agents
+node test/agent-orchestration.test.js
 
-## Tests
+# Tests antiHallucination unitaires
+node test/antiHallucination.test.js
+```
 
-- `npm run test:cloud-smoke`
-- `npm run test:vscode-live`
-- `npm run cloud:executor`
+---
 
-## Documentation par dossier
+## 🔒 Sécurité
 
-- [cloud-executor/README.md](/c:/Serveurs/hf-ai-code/cloud-executor/README.md)
-- [docs/README.md](/c:/Serveurs/hf-ai-code/docs/README.md)
-- [lib/README.md](/c:/Serveurs/hf-ai-code/lib/README.md)
-- [media/README.md](/c:/Serveurs/hf-ai-code/media/README.md)
-- [resources/README.md](/c:/Serveurs/hf-ai-code/resources/README.md)
-- [sandbox/README.md](/c:/Serveurs/hf-ai-code/sandbox/README.md)
-- [scripts/README.md](/c:/Serveurs/hf-ai-code/scripts/README.md)
-- [test/README.md](/c:/Serveurs/hf-ai-code/test/README.md)
-- [test/vscode/README.md](/c:/Serveurs/hf-ai-code/test/vscode/README.md)
-- [.qwen/README.md](/c:/Serveurs/hf-ai-code/.qwen/README.md)
+- **Token HF** : stocké dans VS Code SecretStorage (jamais en clair dans les settings)
+- **Sandbox réseau** : mode `none` par défaut (le container est offline)
+- **Workspace hôte** : jamais modifié directement — revue de patch obligatoire
+- **Secrets non injectés** dans le container sandbox
+- **RLS agents** : agents read-only ne peuvent pas écrire, agents no-shell ne peuvent pas exécuter
+
+---
+
+## 📋 Paramètres Référence Complète
+
+Voir [docs/USER_GUIDE.md](docs/USER_GUIDE.md) pour la liste complète des paramètres.
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] SecretStorage pour cloud bearer token
+- [ ] Tests CI complets GitHub Actions
+- [ ] callMcpTool — invocation outil MCP distante complète
+- [ ] Dashboard agents tree dans le webview
+- [ ] Icône Activity Bar SVG simplifiée
+- [ ] Phases hooks `post_tool` et `on_error`
+
+---
+
+*HF AI Code v1.2.0 — MIT License*

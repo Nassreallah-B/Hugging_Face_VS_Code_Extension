@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  hf-executor:
+    build:
+      context: ..
+      dockerfile: cloud-executor/Dockerfile
+    image: hf-ai-code-executor:latest
+    container_name: hf-ai-executor
+    ports:
+      - "${PORT:-7788}:7788"
+    environment:
+      - HF_API_TOKEN=${HF_API_TOKEN}
+      - HF_MODEL_ID=${HF_MODEL_ID:-Qwen/Qwen3.5-397B-A17B:fastest}
+      - CLOUD_EXECUTOR_DATA_DIR=/data
+      - CLOUD_EXECUTOR_API_KEY=${CLOUD_EXECUTOR_API_KEY}
+      - CLOUD_EXECUTOR_MAX_CONCURRENT_TASKS=${CLOUD_EXECUTOR_MAX_CONCURRENT_TASKS:-4}
+      - CLOUD_EXECUTOR_MAX_ROUNDS=${CLOUD_EXECUTOR_MAX_ROUNDS:-20}
+      - CLOUD_EXECUTOR_SHELL_TIMEOUT_MS=${CLOUD_EXECUTOR_SHELL_TIMEOUT_MS:-60000}
+      - CLOUD_EXECUTOR_SANDBOX_IMAGE=hf-ai-code-sandbox:latest
+      - CLOUD_EXECUTOR_SANDBOX_NETWORK=none
+      - CLOUD_EXECUTOR_SANDBOX_TOOL_TIMEOUT_MS=${CLOUD_EXECUTOR_SANDBOX_TOOL_TIMEOUT_MS:-180000}
+      - PORT=7788
+    volumes:
+      - executor-data:/data
+      # Accès au daemon Docker hôte pour spawner les sandboxes
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7788/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+volumes:
+  executor-data:
+    driver: local

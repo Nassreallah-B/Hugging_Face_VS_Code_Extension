@@ -436,6 +436,21 @@
         "title": "HF AI: Review Pending Patch",
         "icon": "$(diff)",
         "enablement": "hfaicode.viewingDiff"
+      },
+      {
+        "command": "hfaicode.cleanSandboxes",
+        "title": "HF AI: Clean Sandbox Workspaces",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "hfaicode.createAgentsMd",
+        "title": "HF AI: Create AGENTS.md",
+        "icon": "$(file-add)"
+      },
+      {
+        "command": "hfaicode.viewMemory",
+        "title": "HF AI: View Memory Notes",
+        "icon": "$(book)"
       }
     ],
     "keybindings": [

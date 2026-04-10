@@ -1,22 +1,35 @@
-FROM node:22-bookworm-slim
+FROM node:22-slim
 
-ENV DEBIAN_FRONTEND=noninteractive
-
-RUN apt-get update \
-  && apt-get install -y --no-install-recommends \
-    bash \
-    ca-certificates \
-    coreutils \
-    findutils \
+# Outils système essentiels pour les tâches agent
+RUN apt-get update && apt-get install -y \
     git \
-    grep \
-    procps \
+    curl \
+    wget \
     python3 \
     python3-pip \
+    python3-venv \
     ripgrep \
-    sed \
-  && rm -rf /var/lib/apt/lists/*
+    jq \
+    zip \
+    unzip \
+    build-essential \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 
+# Outils Node.js fréquemment nécessaires dans le sandbox
+RUN npm install -g \
+    typescript \
+    ts-node \
+    eslint \
+    prettier \
+    jest \
+    --no-fund \
+    --no-audit \
+    --loglevel error
+
+# Dossier de travail par défaut  
 WORKDIR /workspace
 
-CMD ["sh", "-lc", "trap : TERM INT; while sleep 3600; do :; done"]
+# L'agent écrira ses scripts dans .hfai-sandbox/
+# Ces chemins sont réservés par le runtime
+# Ne jamais monter ce dossier depuis l'hôte
