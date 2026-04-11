@@ -4106,7 +4106,7 @@ class CloudExecutorClient {
       modelId: normalizeModelId(getModelId()),
       temperature: cfg('temperature') ?? 0.2,
       maxTokens: cfg('maxTokens') ?? 4096,
-      maxRounds: getAgentMaxRounds(input.agentType),
+      maxRounds: getAgentMaxRounds(localTask.agentType),
       allowShell: agentAllowShell(),
       shellTimeoutMs: getAgentShellTimeoutMs(),
       agentId: localTask.agentId || '',
@@ -4700,6 +4700,9 @@ class AgentTaskManager {
       return this.runtime.store.getTaskRecord(taskId);
     }
 
+    const task = this.runtime.store.loadTask(taskId);
+    if (!task) throw new Error(`Task not found: ${taskId}`);
+
     this.runtime.store.updateTask(taskId, currentTask => {
       currentTask.status = currentTask.status === 'awaiting_user' ? 'resuming' : 'resuming';
       currentTask.stopRequested = false;
@@ -4711,6 +4714,7 @@ class AgentTaskManager {
       currentTask.resumeCount = Number(currentTask.resumeCount || 0) + 1;
       return currentTask;
     });
+
     if (task.chatId) {
       this.runtime.store.appendMessage(task.chatId, {
         role: 'system-msg',
@@ -4759,6 +4763,7 @@ class AgentTaskManager {
         agentType: input.agentType || 'general-purpose'
       })
       : cloneMessages(input.messages);
+    const agentType = input.agentType || 'general-purpose';
     const task = this.runtime.store.createTask({
       title: input.title,
       prompt: input.prompt,
@@ -4767,7 +4772,7 @@ class AgentTaskManager {
       background: input.background !== false,
       runtimeKind,
       agentId: input.agentId || '',
-      agentType: input.agentType || 'general-purpose',
+      agentType,
       agentName: input.agentName || '',
       teamName: input.teamName || '',
       mode: input.mode || 'default',
@@ -4776,7 +4781,7 @@ class AgentTaskManager {
       executorUrl: runtimeKind === 'cloud' ? getCloudExecutorUrl() : '',
       executionRoot,
       messages: preparedMessages,
-      maxRounds: getAgentMaxRounds(task.agentType),
+      maxRounds: getAgentMaxRounds(agentType),
       containerImage: runtimeKind === 'local' ? getSandboxImage() : '',
       liveMode: Boolean(input.liveMode)
     });
@@ -6161,6 +6166,8 @@ class HFChatViewProvider {
     const text = normalizeWhitespace(userText);
     if (!text || this._streaming) return;
 
+    let isConnected = false;
+
     await appRuntime.initialize();
     const activeChat = appRuntime.store.ensureActiveChat();
     const pendingQuestion = appRuntime.features.getPendingQuestionForChat(activeChat.id);
@@ -6210,6 +6217,7 @@ class HFChatViewProvider {
       return;
     }
     const contextMetaForIntent = appRuntime.getContextMeta(activeChat.id);
+    isConnected = await appRuntime.checkConnection();
     const intentContext = injectIntentFormatInstructions(messages, userText, contextMetaForIntent);
     messages = intentContext.messages;
     this._setResponseMeta(activeChat.id, buildResponseMeta(intentContext, { status: 'pending', issues: [] }, {
