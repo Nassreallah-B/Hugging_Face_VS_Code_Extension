@@ -491,6 +491,10 @@ function fileExists(filePath) {
 
 function getWorkspaceStorageRoot(context) {
   if (context.storageUri && context.storageUri.fsPath) return context.storageUri.fsPath;
+  const folder = getWorkspaceFolder();
+  if (folder) {
+    return path.join(folder.uri.fsPath, '.hfaicode', 'storage');
+  }
   return path.join(context.globalStorageUri.fsPath, 'no-workspace');
 }
 
@@ -1152,11 +1156,21 @@ function sanitizeAgentVisibleText(text) {
 function summarizeAssistantNoteForUi(note) {
   const sanitized = sanitizeAgentVisibleText(note);
   if (!sanitized) return '';
-  const flat = normalizeWhitespace(sanitized);
+  
+  // Clean up technical tags from the UI view
+  const cleaned = sanitized
+    .replace(/\[PHASE:\s*[^\]]+\]/gi, '')
+    .replace(/\[VERDICT:\s*[^\]]+\]/gi, '')
+    .replace(/\[SYSTEM:\s*[^\]]+\]/gi, '')
+    .trim();
+
+  if (!cleaned) return '';
+
+  const flat = normalizeWhitespace(cleaned);
   if (/^(?:i(?:'m| am)? going to|i will|let me|je vais(?: maintenant)?|maintenant je vais|je vais continuer|commençons par|on va commencer par)\b/i.test(flat)) {
     return '';
   }
-  return truncateText(sanitized, 220);
+  return truncateText(cleaned, 220);
 }
 
 function formatJsonForModel(value, maxChars = MAX_AGENT_TOOL_MODEL_RESULT_CHARS) {
@@ -4700,8 +4714,6 @@ class AgentTaskManager {
       return this.runtime.store.getTaskRecord(taskId);
     }
 
-    const task = this.runtime.store.loadTask(taskId);
-    if (!task) throw new Error(`Task not found: ${taskId}`);
 
     this.runtime.store.updateTask(taskId, currentTask => {
       currentTask.status = currentTask.status === 'awaiting_user' ? 'resuming' : 'resuming';
@@ -6217,7 +6229,7 @@ class HFChatViewProvider {
       return;
     }
     const contextMetaForIntent = appRuntime.getContextMeta(activeChat.id);
-    isConnected = await appRuntime.checkConnection();
+    isConnected = await checkConnection();
     const intentContext = injectIntentFormatInstructions(messages, userText, contextMetaForIntent);
     messages = intentContext.messages;
     this._setResponseMeta(activeChat.id, buildResponseMeta(intentContext, { status: 'pending', issues: [] }, {
@@ -6289,8 +6301,8 @@ class HFChatViewProvider {
             this._post({
               type: 'systemMsg',
               text: round === 1
-                ? 'Waiting for the model to plan the first action. Docker will stay idle until the first tool call.'
-                : `Waiting for the model to continue round ${round}/${maxRounds}.`
+                ? '🧠 Building plan... Docker will start automatically when an action is needed.'
+                : `🔄 Refined plan for round ${round}/${maxRounds}...`
             });
           },
           onAssistantNote: (note) => {
@@ -6349,6 +6361,7 @@ class HFChatViewProvider {
         this._abortActiveStream = null;
         this._streaming = false;
       }
+      await this.syncState();
     }
   }
 
