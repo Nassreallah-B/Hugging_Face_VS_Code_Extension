@@ -3033,7 +3033,7 @@
     }
 
     // ── Chat functions ────────────────────────────────────────────────────────────
-    function sendMessage() {
+    function sendMessage(isFromButton = false) {
       const text = $('textarea').value.trim();
       if (isThinking) {
         if (text) {
@@ -3042,7 +3042,9 @@
           vscode.postMessage({ type: 'interruptSend', text, includeFile, background: backgroundMode });
           return;
         }
-        vscode.postMessage({ type: 'stopResponse' });
+        if (isFromButton) {
+          vscode.postMessage({ type: 'stopResponse' });
+        }
         return;
       }
       if (!text) return;
@@ -3206,7 +3208,7 @@
 
     function bindUi() {
       $('model-badge').addEventListener('click', selectModel);
-      $('send-btn').addEventListener('click', sendMessage);
+      $('send-btn').addEventListener('click', () => sendMessage(true));
       $('include-file').addEventListener('change', event => toggleFileContext(event.target));
       $('run-background').addEventListener('change', event => toggleBackgroundMode(event.target));
       $('history-btn').addEventListener('click', openHistoryModal);
