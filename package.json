@@ -359,6 +359,48 @@
           "default": 4000,
           "description": "Default maximum characters returned by the web_fetch tool.",
           "order": 42
+        },
+        "hfaicode.defence.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable AIDefence layer: prompt injection detection, PII/secrets scanning, and dangerous shell command blocking.",
+          "order": 60
+        },
+        "hfaicode.guard.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable MutationGuard: fail-closed write/shell/delete validation per agent role. When disabled, all agents can write freely.",
+          "order": 61
+        },
+        "hfaicode.sparc.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable SPARC analysis (Sense → Plan) on orchestrator tasks. Provides automatic domain detection, risk assessment, and execution planning.",
+          "order": 62
+        },
+        "hfaicode.cve.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable background CVE scanner that checks package.json for known vulnerability patterns.",
+          "order": 63
+        },
+        "hfaicode.plugins.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable the plugin system. Loads plugins from the plugins/ directory (e.g., design-system with UI/UX Pro Max bridge).",
+          "order": 64
+        },
+        "hfaicode.memorydb.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable MemoryDB structured storage. Provides dual-write persistence alongside legacy JSON files for events, agents, metrics, and workflows.",
+          "order": 65
+        },
+        "hfaicode.encryption.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the AES-256-GCM encryption vault for sensitive data at rest. Key is stored in VS Code SecretStorage.",
+          "order": 66
         }
       }
     },

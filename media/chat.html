@@ -1307,6 +1307,44 @@
       line-height: 1.45;
     }
 
+    .module-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px 10px;
+    }
+
+    .mod-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: var(--text2);
+      line-height: 1.4;
+    }
+
+    .mod-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      flex-shrink: 0;
+    }
+
+    .mod-on {
+      background: #4ade80;
+      box-shadow: 0 0 6px rgba(74, 222, 128, .35);
+    }
+
+    .mod-off {
+      background: #4b5563;
+    }
+
+    .mod-label {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
     .task-list {
       gap: 8px;
     }
@@ -2139,6 +2177,13 @@
               <button class="task-btn" data-instruction-scope="global">Global</button>
             </div>
           </div>
+          <div class="overview-card">
+            <div class="overview-head">
+              <span class="overview-title">Security & Modules</span>
+              <span class="overview-chip" id="modules-chip">Active</span>
+            </div>
+            <div id="module-status" class="overview-body">Loading modules...</div>
+          </div>
         </div>
 
         <div id="messages" style="display:none"></div>
@@ -2841,6 +2886,29 @@
       refreshWorkspaceStatus();
     }
 
+    function renderModuleStatus(moduleStatus) {
+      const container = $('module-status');
+      const chip = $('modules-chip');
+      if (!container) return;
+      if (!moduleStatus) {
+        container.innerHTML = '<div class="overview-empty">No module data yet.</div>';
+        return;
+      }
+      const modules = Object.values(moduleStatus);
+      const activeCount = modules.filter(m => m.enabled).length;
+      const totalCount = modules.length;
+      if (chip) {
+        chip.textContent = activeCount + '/' + totalCount + ' active';
+      }
+      container.innerHTML = '<div class="module-grid">' + modules.map(m => {
+        const dot = m.enabled
+          ? '<span class="mod-dot mod-on"></span>'
+          : '<span class="mod-dot mod-off"></span>';
+        const extra = m.roles ? ' (' + m.roles + ' roles)' : m.count ? ' (' + m.count + ')' : '';
+        return '<div class="mod-item">' + dot + '<span class="mod-label">' + escapeHtml(m.label + extra) + '</span></div>';
+      }).join('') + '</div>';
+    }
+
     function renderPatchStatus(patches) {
       pendingPatches = Array.isArray(patches) ? patches : [];
       const container = $('patch-status');
@@ -3204,6 +3272,7 @@
           renderSandboxStatus(msg.sandboxStatus);
           renderInstructionStatus(msg.instructionStatus);
           renderResponseMeta(msg.responseMeta);
+          renderModuleStatus(msg.moduleStatus);
 
           const dot = $('status-dot');
           const badge = $('model-badge');

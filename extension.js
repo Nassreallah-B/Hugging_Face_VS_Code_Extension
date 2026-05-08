@@ -1612,14 +1612,16 @@ function enforceAgentShellPolicy(command) {
   }
 
   // ── AIDefence: enhanced shell validation (Ruflo-inspired) ──────────────────
-  const defenceCheck = aiDefence.validateShellCommand(command);
-  if (defenceCheck.blocked) {
-    const reason = defenceCheck.findings.map(f => f.pattern).join(', ');
-    throw new Error(`Shell command blocked by AIDefence: ${reason}`);
+  if (cfg('defence.enabled') !== false) {
+    const defenceCheck = aiDefence.validateShellCommand(command);
+    if (defenceCheck.blocked) {
+      const reason = defenceCheck.findings.map(f => f.pattern).join(', ');
+      throw new Error(`Shell command blocked by AIDefence: ${reason}`);
+    }
   }
 
   // ── MutationGuard: validate shell permission per agent role ────────────────
-  if (mutationGuard) {
+  if (mutationGuard && cfg('guard.enabled') !== false) {
     const agentType = (global.__currentAgentType) || 'general-purpose';
     const shellCheck = mutationGuard.checkShell(command, agentType);
     if (!shellCheck.allowed) {
@@ -2239,9 +2241,11 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
   // ── AIDefence: scan user prompt for injection (Ruflo-inspired) ──────────────
   const userMessages = messages.filter(m => m.role === 'user');
   const lastUserMsg = userMessages.length > 0 ? userMessages[userMessages.length - 1].content : '';
-  const injectionCheck = aiDefence.detectPromptInjection(lastUserMsg);
-  if (injectionCheck.blocked) {
-    throw new Error(`[AIDefence] Prompt injection detected and blocked: ${injectionCheck.findings.map(f => f.match).join(', ')}`);
+  if (cfg('defence.enabled') !== false) {
+    const injectionCheck = aiDefence.detectPromptInjection(lastUserMsg);
+    if (injectionCheck.blocked) {
+      throw new Error(`[AIDefence] Prompt injection detected and blocked: ${injectionCheck.findings.map(f => f.match).join(', ')}`);
+    }
   }
 
   // ── Learning: inject context from past successes (Ruflo SONA-inspired) ──────
@@ -2324,7 +2328,7 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
       }
 
       // ── MutationGuard: validate write permission before writing ──────────
-      if (toolCall.name === 'write_file' && toolCall.input && mutationGuard) {
+      if (toolCall.name === 'write_file' && toolCall.input && mutationGuard && cfg('guard.enabled') !== false) {
         const writePath = typeof toolCall.input === 'string' ? '' : (toolCall.input.path || toolCall.input.filePath || '');
         const writeContent = typeof toolCall.input === 'string' ? toolCall.input : (toolCall.input.content || '');
         const agentType = execContext.agentType || 'general-purpose';
@@ -4504,7 +4508,9 @@ async function runLocalAgentTask(taskManager, taskId, runtimeState, liveHooks = 
       // On the first round of an aria-orchestrator task, run SPARC Sense+Plan
       // to inject structured domain analysis into the conversation context.
       if (round === 1 && task.agentType === 'aria-orchestrator') {
-        try {
+        if (cfg('sparc.enabled') === false) {
+          console.log('[SPARC] Disabled by setting hfaicode.sparc.enabled');
+        } else try {
           const sparcWorkflow = new SPARCWorkflow({ maxCorrections: 2, reflectionThreshold: 0.6 });
           const userPrompt = (conversation.find(m => m.role === 'user') || {}).content || '';
           const senseResult = await sparcWorkflow.sense({
@@ -6067,6 +6073,17 @@ class HFChatViewProvider {
         workspaceMemoryCount: snapshot.workspaceMemoryCount,
         globalMemoryCount: snapshot.globalMemoryCount
       },
+      moduleStatus: {
+        defence: { enabled: cfg('defence.enabled') !== false, label: 'AIDefence' },
+        guard: { enabled: cfg('guard.enabled') !== false && !!mutationGuard, label: 'MutationGuard', roles: mutationGuard ? mutationGuard.getStats().configuredRoles : 0 },
+        sparc: { enabled: cfg('sparc.enabled') !== false, label: 'SPARC' },
+        cve: { enabled: cfg('cve.enabled') !== false, label: 'CVE Scanner' },
+        plugins: { enabled: cfg('plugins.enabled') !== false && !!pluginManager, label: 'Plugins', count: pluginManager ? pluginManager.loadAll().pluginCount : 0 },
+        memorydb: { enabled: cfg('memorydb.enabled') !== false && !!memoryDB, label: 'MemoryDB' },
+        encryption: { enabled: !!(encryptionVault && encryptionVault.isEnabled && encryptionVault.isEnabled()), label: 'Encryption' },
+        learning: { enabled: !!learningEngine, label: 'Learning' },
+        router: { enabled: !!providerRouter, label: 'Router' }
+      },
       instructionStatus: appRuntime.getInstructionStatus(activeChatId),
       responseMeta: activeChatId ? this._getResponseMeta(activeChatId) : null,
       busy: Boolean(this._streaming),
@@ -6979,13 +6996,17 @@ async function activate(context) {
       console.log('[HF AI] ProviderRouter initialized with HuggingFace default');
 
       // Plugin Manager — extensible plugin system
-      const pluginDirs = [
-        path.join(context.extensionPath, 'plugins'),
-        path.join(context.globalStorageUri.fsPath, 'plugins')
-      ];
-      pluginManager = new PluginManager(pluginDirs);
-      const pluginStatus = pluginManager.loadAll();
-      console.log(`[HF AI] PluginManager loaded: ${pluginStatus.pluginCount} plugins, ${pluginStatus.toolCount} tools, ${pluginStatus.agentCount} agents`);
+      if (cfg('plugins.enabled') !== false) {
+        const pluginDirs = [
+          path.join(context.extensionPath, 'plugins'),
+          path.join(context.globalStorageUri.fsPath, 'plugins')
+        ];
+        pluginManager = new PluginManager(pluginDirs);
+        const pluginStatus = pluginManager.loadAll();
+        console.log(`[HF AI] PluginManager loaded: ${pluginStatus.pluginCount} plugins, ${pluginStatus.toolCount} tools, ${pluginStatus.agentCount} agents`);
+      } else {
+        console.log('[HF AI] PluginManager disabled by setting');
+      }
 
       // Hook Registry — 11 lifecycle phases
       hookRegistry = new HookRegistry();
@@ -7026,9 +7047,7 @@ async function activate(context) {
 
       // Encryption Vault — AES-256-GCM for sensitive data
       encryptionVault = new EncryptionVault({ enabled: false, keySource: 'secretStorage' });
-      // Encryption is opt-in: enabled via setting hfaicode.encryption.enabled
-      const encryptionEnabled = vscode.workspace.getConfiguration('hfaicode').get('encryption.enabled');
-      if (encryptionEnabled) {
+      if (cfg('encryption.enabled')) {
         try {
           encryptionVault.setEnabled(true);
           await encryptionVault.initializeKey(context.secrets);
@@ -7056,8 +7075,12 @@ async function activate(context) {
       }
 
       // MutationGuard — fail-closed write/shell/delete validation
-      mutationGuard = new MutationGuard();
-      console.log(`[HF AI] MutationGuard active: ${mutationGuard.getStats().configuredRoles} roles, ${mutationGuard.getStats().blockedPaths} blocked paths`);
+      if (cfg('guard.enabled') !== false) {
+        mutationGuard = new MutationGuard();
+        console.log(`[HF AI] MutationGuard active: ${mutationGuard.getStats().configuredRoles} roles, ${mutationGuard.getStats().blockedPaths} blocked paths`);
+      } else {
+        console.log('[HF AI] MutationGuard disabled by setting');
+      }
     } catch (err) {
       console.warn('[HF AI] Module initialization warning:', err.message);
     }
