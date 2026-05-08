@@ -293,11 +293,7 @@ function getModelId() {
 function normalizeModelId(modelId) {
   let value = String(modelId || '').trim();
   if (!value) return DEFAULT_MODEL_ID;
-  // If we already have a colon (custom provider or already has fastest), use as is
-  if (value.includes(':')) return value;
-  // Don't append fastest to obvious local paths or IPs
-  if (value.startsWith('/') || value.startsWith('./') || /^\d+\.\d+\.\d+\.\d+/.test(value)) return value;
-  return `${value}:fastest`;
+  return value;
 }
 
 function getBaseModelId(modelId) {
