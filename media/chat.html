@@ -2278,6 +2278,7 @@
     let isThinking = false;
     let currentChunk = '';
     let currentMsgEl = null;
+    let currentSystemMsgEl = null;
     let msgCount = 0;
     let includeFile = true;
     let chats = [];
@@ -2469,6 +2470,7 @@
     }
 
     function appendMsg(role, text, isRaw, timestamp) {
+      if (role !== 'system-msg') currentSystemMsgEl = null;
       msgCount++;
       showMessages(true);
       const wrap = document.createElement('div');
@@ -3373,7 +3375,14 @@
         }
 
         case 'systemMsg': {
-          appendMsg('system-msg', msg.text, false);
+          const isQuestionCard = msg.text && msg.text.includes('**Waiting for your answer**');
+          if (!isQuestionCard && currentSystemMsgEl && currentSystemMsgEl.parentNode) {
+            currentSystemMsgEl.innerHTML = parseMarkdown(msg.text);
+          } else {
+            const el = appendMsg('system-msg', msg.text, false);
+            if (!isQuestionCard && el) currentSystemMsgEl = el.content;
+          }
+          scrollToBottom();
           break;
         }
       }
