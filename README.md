@@ -117,32 +117,60 @@ Utilisez la commande `HF AI: Set API Token` (Ctrl+Shift+P) — le token est stoc
 ## 🏗️ Architecture
 
 ```text
-extension.js                  ← Noyau principal (6700+ lignes)
+extension.js                  ← Noyau principal (7100+ lignes)
 lib/
+  runtimeFeatures.js          ← Sub-agents, teams, hooks, MCP-like, coûts + pont MemoryDB
+  memoryDB.js                 ← Stockage structuré local (10 tables JSON, fichier unique)
+  sparc.js                    ← SPARC : Sense → Plan → Act → Reflect → Correct
+  mutationGuard.js            ← Garde-fou écriture/shell/suppression (15 rôles)
+  aiDefence.js                ← Sécurité : injection, PII, secrets, shell
+  providerRouter.js           ← Routage multi-LLM (6 providers, failover, round-robin)
+  vectorDB.js                 ← Recherche vectorielle hybride (cosine + BM25 + RRF)
+  pluginManager.js            ← Système de plugins hot-loadable
+  learningEngine.js           ← Auto-apprentissage SONA
+  swarmTopology.js            ← Topologies multi-agents (pipeline, hub-spoke, map-reduce)
+  cveScanner.js               ← Scanner vulnérabilités npm
+  encryption.js               ← Coffre-fort AES-256-GCM
+  hooksAndWorkers.js          ← Hooks lifecycle (11 phases) + workers background
   dockerSandbox.js            ← Gestionnaire Docker (sandbox lifecycle)
-  runtimeFeatures.js          ← Sub-agents, teams, hooks, MCP-like, coûts
   antiHallucination.js        ← Validation post-génération
+  config.js                   ← Constantes et lecteurs de config
+plugins/
+  design-system/
+    manifest.json             ← Déclaration du plugin design system
+    tools/designSystem.js     ← Bridge JS → Python + fallback intégré
+skills/
+  ui-ux-pro-max/
+    scripts/                  ← 3 scripts Python (core, design_system, search)
+    data/                     ← 30 CSVs + 16 stacks (1.5 MB total)
 cloud-executor/
   server.js                   ← Serveur HTTP d'exécution distante
   Dockerfile                  ← Image du cloud executor
   docker-compose.yml          ← Déploiement cloud executor
-  .env.example                ← Variables d'environnement
 sandbox/
   Dockerfile                  ← Image sandbox Node.js 22 + outils
 scripts/
   build-sandbox.js            ← Build de l'image sandbox
   run-cloud-executor-smoke.js ← Tests de l'executor
-  run-anti-hallucination-checks.js
 test/
-  antiHallucination.test.js   ← Tests unitaires antiHallucination
+  antiHallucination.test.js   ← Tests antiHallucination
   agent-orchestration.test.js ← Tests orchestration multi-agents
+test-modules.js               ← Suite de tests modulaire (132 tests)
 docs/
+  MODULAR_ARCHITECTURE.md     ← Documentation complète des 16 modules lib/
+  PLUGIN_SYSTEM.md            ← Plugin system + UI/UX Pro Max bridge
+  ARIA_ECOSYSTEM.md           ← Orchestration agents + SPARC + MutationGuard
+  ARCHITECTURE_MEMORY_RAG.md  ← Mémoire, RAG, MemoryDB, VectorDB
   ADVANCED_AGENT_RUNTIME.md   ← Runtime avancé (sub-agents, teams, hooks)
   AGENTS_AND_SANDBOXES.md     ← Sandbox et cycle de vie agents
-  ARCHITECTURE_MEMORY_RAG.md  ← Mémoire et RAG
-  CLOUD_EXECUTOR.md           ← Cloud executor
   SCHEMAS_AND_PROTOCOLS.md    ← Schemas et protocoles
+  CLOUD_EXECUTOR.md           ← Cloud executor
+  TESTING.md                  ← Tests (132 tests documentés)
+  IMPLEMENTATION_HISTORY.md   ← Historique des 17 phases d'évolution
 ```
+
+> **⚠️ TOUT EST LOCAL** — Aucune base de données externe, aucun stockage cloud.
+> Le seul trafic réseau est vers les API LLM (HuggingFace, Ollama, etc.).
 
 ---
 
@@ -185,6 +213,9 @@ docker compose up -d
 ## 🧪 Tests
 
 ```powershell
+# Suite de tests modulaire (132 tests — 16 modules + wiring)
+node test-modules.js
+
 # Tests anti-hallucination
 npm run test:anti-hallucination
 
@@ -196,6 +227,9 @@ node test/agent-orchestration.test.js
 
 # Tests antiHallucination unitaires
 node test/antiHallucination.test.js
+
+# Validation syntaxique complète
+node -c extension.js && node -c lib/runtimeFeatures.js && node -c lib/memoryDB.js && node -c lib/sparc.js
 ```
 
 ---
@@ -206,7 +240,12 @@ node test/antiHallucination.test.js
 - **Sandbox réseau** : mode `none` par défaut (le container est offline)
 - **Workspace hôte** : jamais modifié directement — revue de patch obligatoire
 - **Secrets non injectés** dans le container sandbox
-- **RLS agents** : agents read-only ne peuvent pas écrire, agents no-shell ne peuvent pas exécuter
+- **AIDefence** (`lib/aiDefence.js`) : détection injection de prompt, PII, secrets, commandes shell dangereuses
+- **MutationGuard** (`lib/mutationGuard.js`) : garde-fou fail-closed par rôle d'agent — 15 rôles configurés, chemins bloqués (`.env`, `node_modules/`, `.git/`), audit log
+- **Encryption** (`lib/encryption.js`) : coffre-fort AES-256-GCM optionnel pour données sensibles
+- **RLS agents** : agents read-only (Explore, Plan, verification) ne peuvent ni écrire ni exécuter de shell
+- **Orchestrator** : `aria-orchestrator` est interdit d'écriture directe — il doit déléguer
+- **Stockage** : 100% local — aucune base de données externe, aucun stockage cloud
 
 ---
 
@@ -218,12 +257,28 @@ Voir [docs/USER_GUIDE.md](docs/USER_GUIDE.md) pour la liste complète des param�
 
 ## 🗺️ Roadmap
 
+### ✅ Complété
+- [x] Modularisation en 16 modules `lib/` testés (132 tests)
+- [x] MemoryDB — stockage structuré local (10 tables)
+- [x] SPARC — analyse automatique pour l'orchestrateur
+- [x] MutationGuard — garde-fou écriture/shell/suppression
+- [x] Plugin system + UI/UX Pro Max bridge
+- [x] VectorDB — recherche hybride cosine + BM25
+- [x] AIDefence — sécurité multi-couches
+- [x] Encryption vault AES-256-GCM
+- [x] Swarm topologies (pipeline, hub-spoke, map-reduce)
+- [x] CVE scanner background
+- [x] Dual-write MemoryDB ↔ RuntimeFeatureStore
+
+### 🔮 Futur
 - [ ] SecretStorage pour cloud bearer token
 - [ ] Tests CI complets GitHub Actions
 - [ ] callMcpTool — invocation outil MCP distante complète
 - [ ] Dashboard agents tree dans le webview
 - [ ] Icône Activity Bar SVG simplifiée
-- [ ] Phases hooks `post_tool` et `on_error`
+- [ ] Phases hooks `post_tool` et `on_error` (implémentées côté hook system, pas encore câblées)
+- [ ] Migration SQLite optionnelle pour MemoryDB (upgrade path documenté)
+- [ ] Mesh topology pour swarms complexes
 
 ---
 

@@ -172,3 +172,125 @@ It keeps:
 - live recent turns
 
 This combination is what gives the extension practical continuity across long sessions and restarts.
+
+## MemoryDB — Structured Memory Layer
+
+In addition to the file-based storage above, the extension uses `MemoryDB` — a **local JSON file** (`memory.json`) organized in 10 structured tables. This is NOT an external database.
+
+### Why Both Systems Exist
+
+| Concern | File-Based (PersistentState) | MemoryDB |
+|---|---|---|
+| **Source of truth** | ✅ Primary | Secondary (dual-write) |
+| **Format** | Multiple JSON/JSONL files | Single JSON file, 10 tables |
+| **Query capability** | Read entire file | Namespace filters, TTL, tags |
+| **Data types** | Chats, messages, tasks, patches, memory | Events, patterns, agent state, metrics, workflows |
+| **Backward compat** | Full — existing code unchanged | Additive — new code can query MemoryDB |
+
+### Dual-Write Bridge
+
+When `RuntimeFeatureStore` writes data, it automatically mirrors to MemoryDB:
+
+```text
+RuntimeFeatureStore                          MemoryDB (memory.json)
+─────────────────                          ─────────────────────────
+appendEvent()     ──── dual-write ────→    events table
+saveOnboarding()  ──── dual-write ────→    memory_store (ns: onboarding)
+saveAgent()       ──── dual-write ────→    agent_memory table
+recordUsage()     ──── dual-write ────→    performance_metrics table
+```
+
+All dual-writes are **best-effort** (wrapped in try/catch). If MemoryDB fails, the primary JSON files remain intact.
+
+### MemoryDB Tables
+
+| Table | Records | Purpose |
+|---|---|---|
+| `memory_store` | KV pairs with namespaces | General structured data |
+| `sessions` | Active sessions | Session tracking |
+| `agents` | Agent registry | Agent configurations |
+| `tasks` | Task tracking | Task status |
+| `agent_memory` | Per-agent data | Private agent state |
+| `shared_state` | Cross-agent data | Coordination state |
+| `events` | Capped at 5000 | Event journal |
+| `patterns` | Learned patterns | Error handling, performance |
+| `performance_metrics` | Capped at 10000 | LLM usage, timing |
+| `workflow_state` | SPARC state | Workflow checkpoints |
+
+### Storage Location
+
+```
+<VS Code globalStorageUri>/memory.json    ← Single local file
+```
+
+## VectorDB — Semantic Search Layer
+
+The `VectorDB` (`lib/vectorDB.js`) provides local vector search capabilities alongside the existing RAG pipeline.
+
+### Search Modes
+
+| Mode | Algorithm | Use Case |
+|---|---|---|
+| **Cosine** | Cosine similarity on embeddings | Pure semantic search |
+| **BM25** | TF-IDF style lexical ranking | Keyword-based search |
+| **Hybrid** | RRF fusion of cosine + BM25 | Best of both worlds |
+
+### Storage
+
+```
+<VS Code globalStorageUri>/vectordb.json    ← Single local file
+```
+
+### Relationship to RAG
+
+The existing RAG pipeline (`rag/index.json`) handles workspace file indexing and retrieval. VectorDB provides an additional search layer for agent memory, patterns, and cross-session data.
+
+## Complete Storage Map
+
+All persistence is 100% local — **no external databases, no cloud storage, no network calls for data**.
+
+```text
+Workspace Storage (per project)
+├── chats/
+│   ├── index.json              ← Chat list
+│   ├── messages/<chatId>.jsonl ← Chat messages
+│   └── summaries/<chatId>.json ← Rolling summaries
+├── tasks/
+│   ├── index.json              ← Task list
+│   └── <taskId>.json           ← Task state + checkpoints
+├── patches/
+│   ├── index.json              ← Patch list
+│   └── <patchId>.json          ← Patch artifacts
+├── memory/
+│   └── workspace.json          ← Workspace-scoped notes
+├── rag/
+│   └── index.json              ← Workspace file index
+├── agent-runtime/
+│   ├── agents/                 ← Agent records
+│   ├── teams/                  ← Team records
+│   ├── questions/              ← Q&A suspension records
+│   ├── events.json             ← Runtime events
+│   ├── hooks.json              ← Lifecycle hooks
+│   ├── costs.json              ← LLM usage tracking
+│   ├── onboarding.json         ← Project conventions
+│   ├── mcp-profiles.json       ← MCP-like catalogs
+│   ├── mcp-connections.json    ← MCP connections
+│   └── logs/
+│       ├── runtime.log         ← Append-only runtime log
+│       └── audit.log           ← Append-only audit log
+└── sandboxes/                  ← Docker sandbox data
+
+Global Storage (per user)
+├── memory/global.json          ← Global memory notes
+├── memory.json                 ← MemoryDB (10 tables)
+└── vectordb.json               ← Vector search index
+
+RAM Only (lost on restart)
+├── LearningEngine trajectories
+├── ProviderRouter health state
+├── MutationGuard audit log
+└── AIDefence state
+```
+
+The only network calls the extension makes are **LLM API requests** (HuggingFace, Ollama, etc.) for chat completions and embeddings.
+

@@ -1,114 +1,121 @@
 # Testing
 
-## Runtime vNext checks
+## Suite de Tests Modulaire
 
-Current validation performed after the advanced runtime changes:
-
-- `node -c extension.js`
-- `node -c cloud-executor/server.js`
-- `node -c lib/runtimeFeatures.js`
-
-Cloud API additions to smoke manually:
-
-- `GET /tasks/:id/output`
-- `PATCH /tasks/:id`
-- `POST /tasks/:id/messages`
-- `POST /tasks/:id/resume`
-
-## Local Static Validation
-
-These checks should pass after code changes:
+La suite principale valide les 16 modules `lib/` et le plugin system :
 
 ```powershell
-node -c extension.js
-node -c cloud-executor/server.js
-node -c lib/dockerSandbox.js
-node -e "JSON.parse(require('fs').readFileSync('package.json','utf8')); console.log('package ok')"
+# Tests complets — 132 tests
+node test-modules.js
 ```
 
-The embedded webview script can also be syntax-checked by extracting the `<script>` block from `media/chat.html`.
+### Structure des Tests (111 tests de base)
 
-## Live Hugging Face Checks
+| # | Module | Tests | Validations |
+|---|---|---|---|
+| 1 | AIDefence | 14 | Injection, PII, secrets, shell, rédaction |
+| 2 | Learning Engine | 5 | Trajectoires, recommandations, stats |
+| 3 | Provider Router | 9 | Providers, failover, recovery, routage domaine |
+| 4 | Plugin Manager | 8 | Chargement, outils, agents, hooks, enable/disable |
+| 5 | VectorDB | 9 | Cosine, BM25, hybrid, filtre, persistence |
+| 6 | MemoryDB | 14 | KV store, sessions, agents, shared state, events, patterns, metrics, workflows |
+| 7 | SPARC Workflow | 6 | Domaines, complexité, risques, status |
+| 8 | MutationGuard | 14 | Write, shell, delete, approval, audit log, dynamic block |
+| 9 | Swarm Topology | 13 | Pipeline, hub-spoke, map-reduce, décomposition, exécution |
+| 10 | CVE Scanner | 4 | Patterns connus, scan, erreurs, fichier manquant |
+| 11 | Encryption | 7 | AES-256-GCM, tamper, passthrough, vault status |
+| 12 | Hooks & Workers | 8 | Hook CRUD, workers, pool dispose |
 
-Useful direct checks:
+### Tests d'Intégration SPARC + MemoryDB (21 tests)
 
-- router model discovery through `/v1/models`
-- chat completion through `/v1/chat/completions`
-- embedding call through `/hf-inference/models/<embedding-model>`
+```powershell
+# Test séparé pour les câblages SPARC → Agent Loop et MemoryDB → RuntimeFeatureStore
+node -e "<voir test inline dans le walkthrough>"
+```
 
-Requirements:
+Validations :
+- SPARC détecte les domaines (database, security, ui, etc.)
+- SPARC identifie les risques (schema_change, security_sensitive, etc.)
+- SPARC assigne les bons agents (database-expert, security-sentinel)
+- MemoryDB persiste les workflows SPARC
+- MemoryDB reçoit les événements dual-write
+- MemoryDB stocke l'onboarding, agents, métriques
 
-- `HF_TOKEN` or `HF_API_TOKEN`
-- router-compatible chat model
-- embedding-capable HF model
+---
 
-## Extension Live Test
+## Validation Statique
 
-Script:
+```powershell
+# Vérification syntaxique des fichiers critiques
+node -c extension.js
+node -c lib/runtimeFeatures.js
+node -c lib/memoryDB.js
+node -c lib/sparc.js
+node -c lib/mutationGuard.js
+node -c lib/aiDefence.js
+node -c lib/vectorDB.js
+node -c lib/providerRouter.js
+node -c lib/pluginManager.js
+node -c lib/swarmTopology.js
+node -c lib/cveScanner.js
+node -c lib/encryption.js
+node -c lib/hooksAndWorkers.js
+node -c lib/learningEngine.js
+node -c cloud-executor/server.js
+```
+
+## Test du Plugin Design System
+
+```powershell
+# Test du bridge Python UI/UX Pro Max
+node -e "
+const { execute } = require('./plugins/design-system/tools/designSystem');
+execute({ query: 'luxury salon', projectName: 'MySalon', action: 'generate_design_system' })
+  .then(r => console.log('Source:', r.source));
+"
+```
+
+## Tests Live Extension
 
 ```powershell
 npm run test:vscode-live
 ```
 
-This test exercises:
+Exercice : activation, connexion, RAG rebuild, retrieval, envoi prompt, multi-chat, background task.
 
-- extension activation
-- connection check
-- RAG rebuild
-- semantic retrieval
-- prompt send
-- multi-chat persistence
-- background task flow
+Requis : `HF_TOKEN`
 
-Environment:
-
-- `HF_TOKEN`
-
-## Cloud Executor Smoke Test
-
-Script:
+## Test Smoke Cloud Executor
 
 ```powershell
 npm run test:cloud-smoke
 ```
 
-This validates:
+Valide : startup, `/health`, création tâche, complétion agent.
 
-- executor startup
-- `/health`
-- remote task creation
-- remote agent completion
+Requis : Docker + `HF_API_TOKEN`
 
-Requirements for the full path:
+## Sandbox Validation
 
-- Docker available
-- `HF_API_TOKEN` or forwarded token enabled
-
-## Sandbox-Specific Validation
-
-To validate the sandbox runtime itself:
-
-1. start Docker Desktop
-2. confirm the Linux engine is healthy
-3. run an agent request that edits files
-4. confirm a pending patch appears instead of direct workspace mutation
-5. review and accept the patch
+1. Démarrer Docker Desktop
+2. Confirmer que le moteur Linux est healthy
+3. Lancer un agent qui modifie des fichiers
+4. Confirmer qu'un patch pending apparaît (pas de mutation directe)
+5. Review et accepter le patch
 
 ## Resume Validation
 
-Manual restart test:
+1. Lancer une tâche background longue
+2. Fermer VS Code pendant l'exécution
+3. Redémarrer
+4. Confirmer le statut `resuming` ou `interrupted`
+5. Confirmer la reprise depuis le dernier checkpoint
 
-1. start a long-running background task
-2. close VS Code or stop the cloud executor while it is running
-3. restart the runtime
-4. confirm the task returns as `resuming` or `interrupted`
-5. confirm execution continues from the last checkpoint
+## Environnement Requis
 
-## Known Environment Blockers
-
-The most common reasons integration tests cannot be completed are:
-
-- Docker daemon unavailable
-- HF token missing or under-scoped
-- selected model unavailable through the router
-- embedding model unavailable
+| Composant | Obligatoire | Usage |
+|---|---|---|
+| Node.js 22+ | ✅ | Extension, tests |
+| Python 3.x | ❌ (fallback dispo) | UI/UX Pro Max bridge |
+| Docker | ❌ (sandbox optionnel) | Sandbox isolé |
+| HF Token | ✅ (pour les tests live) | API LLM |

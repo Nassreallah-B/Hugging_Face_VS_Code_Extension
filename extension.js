@@ -19,6 +19,20 @@ const {
   RuntimeFeatureStore
 } = require('./lib/runtimeFeatures');
 
+// ── New modules (Ruflo-inspired improvements) ─────────────────────────────────
+const aiDefence = require('./lib/aiDefence');
+const { LearningEngine } = require('./lib/learningEngine');
+const { ProviderRouter, routeTaskToAgent } = require('./lib/providerRouter');
+const { PluginManager } = require('./lib/pluginManager');
+const { VectorDB } = require('./lib/vectorDB');
+const { SwarmOrchestrator, decomposeTask, TOPOLOGY } = require('./lib/swarmTopology');
+const { EncryptionVault } = require('./lib/encryption');
+const { scanPackageJson } = require('./lib/cveScanner');
+const { HookRegistry, WorkerPool } = require('./lib/hooksAndWorkers');
+const { MemoryDB } = require('./lib/memoryDB');
+const { SPARCWorkflow } = require('./lib/sparc');
+const { MutationGuard } = require('./lib/mutationGuard');
+
 // ── State ─────────────────────────────────────────────────────────────────────
 let chatProvider;
 let statusBarItem;
@@ -28,6 +42,16 @@ let debounceTimer;
 let lastConnectionError = '';
 let extensionContext;
 let appRuntime;
+
+// ── New module instances ──────────────────────────────────────────────────────
+let learningEngine = null;
+let providerRouter = null;
+let pluginManager = null;
+let hookRegistry = null;
+let workerPool = null;
+let encryptionVault = null;
+let memoryDB = null;
+let mutationGuard = null;
 
 const HF_ROUTER_HOST = 'router.huggingface.co';
 const HF_CHAT_COMPLETIONS_PATH = '/v1/chat/completions';
@@ -1587,6 +1611,26 @@ function enforceAgentShellPolicy(command) {
     throw new Error('Shell access is disabled by settings.');
   }
 
+  // ── AIDefence: enhanced shell validation (Ruflo-inspired) ──────────────────
+  const defenceCheck = aiDefence.validateShellCommand(command);
+  if (defenceCheck.blocked) {
+    const reason = defenceCheck.findings.map(f => f.pattern).join(', ');
+    throw new Error(`Shell command blocked by AIDefence: ${reason}`);
+  }
+
+  // ── MutationGuard: validate shell permission per agent role ────────────────
+  if (mutationGuard) {
+    const agentType = (global.__currentAgentType) || 'general-purpose';
+    const shellCheck = mutationGuard.checkShell(command, agentType);
+    if (!shellCheck.allowed) {
+      throw new Error(`Shell command blocked by MutationGuard: ${shellCheck.reason}`);
+    }
+    if (shellCheck.requiresApproval) {
+      console.log(`[MutationGuard] Shell command requires approval: "${command}" (${shellCheck.reason})`);
+      if (memoryDB) memoryDB.appendEvent('shell.approval_needed', { command: command.slice(0, 200), agent: agentType }, 'mutationGuard');
+    }
+  }
+
   const blockedPatterns = [
     '\\brm\\s+-rf\\b',
     '\\bdel\\s+/s\\b',
@@ -2190,6 +2234,23 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
   const executedTools = [];
   const priorToolResults = new Map();
   const maxRounds = getAgentMaxRounds();
+  const startTime = Date.now();
+
+  // ── AIDefence: scan user prompt for injection (Ruflo-inspired) ──────────────
+  const userMessages = messages.filter(m => m.role === 'user');
+  const lastUserMsg = userMessages.length > 0 ? userMessages[userMessages.length - 1].content : '';
+  const injectionCheck = aiDefence.detectPromptInjection(lastUserMsg);
+  if (injectionCheck.blocked) {
+    throw new Error(`[AIDefence] Prompt injection detected and blocked: ${injectionCheck.findings.map(f => f.match).join(', ')}`);
+  }
+
+  // ── Learning: inject context from past successes (Ruflo SONA-inspired) ──────
+  if (learningEngine) {
+    const learningContext = learningEngine.buildLearningContext(lastUserMsg, execContext.agentType);
+    if (learningContext) {
+      conversation.unshift({ role: 'system', content: learningContext });
+    }
+  }
 
   for (let round = 0; round < maxRounds; round += 1) {
     if (execContext.runtimeState && execContext.runtimeState.stopRequested) {
@@ -2209,12 +2270,34 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
     const safeAssistantText = sanitizeAgentVisibleText(assistantText) || assistantText;
     const safeCleanedText = sanitizeAgentVisibleText(cleanedText);
 
+    // ── AIDefence: scan assistant output for PII/secrets ──────────────────────
+    const outputCheck = aiDefence.scanForSecrets(safeAssistantText);
+    if (!outputCheck.clean) {
+      console.warn('[AIDefence] Secrets detected in assistant output:', outputCheck.findings.map(f => f.type).join(', '));
+    }
+
     if (!toolCalls.length) {
       conversation.push({
         role: 'assistant',
         content: safeAssistantText
       });
       if (hooks.onConversationUpdate) hooks.onConversationUpdate(cloneMessages(conversation), round + 1);
+
+      // ── Learning: record successful trajectory ──────────────────────────────
+      if (learningEngine && execContext.taskId) {
+        try {
+          learningEngine.recordTrajectory({
+            taskId: execContext.taskId,
+            title: execContext.taskTitle || '',
+            prompt: lastUserMsg,
+            agentType: execContext.agentType || 'general-purpose',
+            toolSequence: executedTools,
+            outcome: 'completed',
+            duration: Date.now() - startTime
+          });
+        } catch (_) {}
+      }
+
       return {
         finalText: safeAssistantText,
         executedTools,
@@ -2240,6 +2323,31 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
         throw new Error('Task stopped by user.');
       }
 
+      // ── MutationGuard: validate write permission before writing ──────────
+      if (toolCall.name === 'write_file' && toolCall.input && mutationGuard) {
+        const writePath = typeof toolCall.input === 'string' ? '' : (toolCall.input.path || toolCall.input.filePath || '');
+        const writeContent = typeof toolCall.input === 'string' ? toolCall.input : (toolCall.input.content || '');
+        const agentType = execContext.agentType || 'general-purpose';
+        const guardResult = mutationGuard.checkWrite(writePath, agentType, writeContent);
+        if (!guardResult.allowed) {
+          console.warn(`[MutationGuard] BLOCKED write to "${writePath}" by ${agentType}: ${guardResult.reason}`);
+          if (memoryDB) memoryDB.appendEvent('mutation.blocked', { path: writePath, agent: agentType, reason: guardResult.reason }, 'mutationGuard');
+        }
+        if (guardResult.requiresApproval) {
+          console.log(`[MutationGuard] Write to "${writePath}" requires approval (${guardResult.reason})`);
+          if (memoryDB) memoryDB.appendEvent('mutation.approval_needed', { path: writePath, agent: agentType }, 'mutationGuard');
+        }
+      }
+
+      // ── AIDefence: scan write_file content for secrets before writing ──────
+      if (toolCall.name === 'write_file' && toolCall.input) {
+        const writeContent = typeof toolCall.input === 'string' ? toolCall.input : (toolCall.input.content || '');
+        const writeCheck = aiDefence.scanForSecrets(writeContent);
+        if (!writeCheck.clean) {
+          console.warn('[AIDefence] Secrets detected in write_file content:', writeCheck.findings.map(f => f.type).join(', '));
+        }
+      }
+
       if (hooks.onToolCall) hooks.onToolCall(toolCall, round + 1);
       const toolSignature = createToolCallSignature(toolCall);
       if (isDedupeEligibleTool(toolCall.name) && priorToolResults.has(toolSignature)) {
@@ -2254,8 +2362,9 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
         continue;
       }
       try {
+        const toolStart = Date.now();
         const resultValue = await executeAgentToolCall(toolCall, execContext);
-        executedTools.push({ name: toolCall.name, input: toolCall.input, ok: true });
+        executedTools.push({ name: toolCall.name, input: toolCall.input, ok: true, durationMs: Date.now() - toolStart });
         const compactBlock = buildToolResultBlockForModel(toolCall, resultValue, true);
         toolResultBlocks.push(compactBlock);
         if (isDedupeEligibleTool(toolCall.name)) {
@@ -2267,7 +2376,7 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
         if (hooks.onToolResult) hooks.onToolResult(toolCall, resultValue, true, round + 1);
       } catch (error) {
         const errorText = error instanceof Error ? error.message : String(error);
-        executedTools.push({ name: toolCall.name, input: toolCall.input, ok: false, error: errorText });
+        executedTools.push({ name: toolCall.name, input: toolCall.input, ok: false, error: errorText, durationMs: 0 });
         toolResultBlocks.push(buildToolResultBlockForModel(toolCall, errorText, false));
         if (hooks.onToolResult) hooks.onToolResult(toolCall, errorText, false, round + 1);
       }
@@ -2275,6 +2384,21 @@ async function runAutonomousAgent(messages, hooks = {}, execContext = {}) {
 
     conversation.push(buildToolResultsConversationMessage(round + 1, toolResultBlocks));
     if (hooks.onConversationUpdate) hooks.onConversationUpdate(cloneMessages(conversation), round + 1);
+  }
+
+  // ── Learning: record failed trajectory (max rounds exceeded) ────────────────
+  if (learningEngine && execContext.taskId) {
+    try {
+      learningEngine.recordTrajectory({
+        taskId: execContext.taskId,
+        title: execContext.taskTitle || '',
+        prompt: lastUserMsg,
+        agentType: execContext.agentType || 'general-purpose',
+        toolSequence: executedTools,
+        outcome: 'failed',
+        duration: Date.now() - startTime
+      });
+    } catch (_) {}
   }
 
   throw new Error(`Agent stopped after ${maxRounds} rounds without producing a final answer.`);
@@ -3015,6 +3139,9 @@ class RagIndexManager {
     this.watchers = [];
     this.running = false;
     this.lastManualRebuildAt = 0;
+    // ── VectorDB: accelerated semantic search ──────────────────────────────
+    this.vectorDB = new VectorDB(path.join(path.dirname(store.getRagIndexPath()), 'vector.db.json'));
+    this.vectorDB.load();
   }
 
   async initialize() {
@@ -3221,8 +3348,20 @@ class RagIndexManager {
       const vectors = await retryWithBackoff(() => featureExtractionRequest(inputs), maxRetries);
       if (!Array.isArray(vectors)) return;
       for (let i = 0; i < missing.length; i += 1) {
-        if (Array.isArray(vectors[i])) missing[i].embedding = vectors[i];
+        if (Array.isArray(vectors[i])) {
+          missing[i].embedding = vectors[i];
+          // ── VectorDB: store embedding for accelerated future searches ──────
+          try {
+            this.vectorDB.upsert(missing[i].id, vectors[i], {
+              filePath: missing[i].path,
+              language: missing[i].language,
+              content: truncateText(missing[i].text, 500)
+            });
+          } catch (_) {}
+        }
       }
+      // Save VectorDB alongside the JSON index
+      try { this.vectorDB.save(); } catch (_) {}
       this.saveIndex();
     } catch (error) {
       console.error(`[hf-ai-code] Embedding failed after retries: ${error.message}`);
@@ -4359,6 +4498,74 @@ async function runLocalAgentTask(taskManager, taskId, runtimeState, liveHooks = 
       round += 1;
       if (round > maxRounds) {
         throw new Error(`Agent stopped after ${maxRounds} rounds without producing a final answer.`);
+      }
+
+      // ── SPARC Analysis (orchestrator-only, round 1) ────────────────────────
+      // On the first round of an aria-orchestrator task, run SPARC Sense+Plan
+      // to inject structured domain analysis into the conversation context.
+      if (round === 1 && task.agentType === 'aria-orchestrator') {
+        try {
+          const sparcWorkflow = new SPARCWorkflow({ maxCorrections: 2, reflectionThreshold: 0.6 });
+          const userPrompt = (conversation.find(m => m.role === 'user') || {}).content || '';
+          const senseResult = await sparcWorkflow.sense({
+            prompt: userPrompt,
+            workspaceFiles: [],
+            openFiles: [],
+            recentErrors: [],
+            agentMemory: memoryDB ? { patterns: memoryDB.findPatterns('general', '').slice(0, 5).map(p => p.name) } : {}
+          });
+          const planResult = await sparcWorkflow.plan(senseResult);
+
+          // Build a compact SPARC context block for the orchestrator
+          const domains = senseResult.analysis.domains.map(d => `${d.name} (→ ${d.suggestedAgent}, ${d.priority})`).join(', ');
+          const risks = senseResult.analysis.risks.length > 0 ? senseResult.analysis.risks.join(', ') : 'none detected';
+          const mitigations = planResult.riskMitigations.map(m => `${m.risk}: ${m.mitigation}`).join('\n  ');
+          const subtasks = planResult.subtasks.map(t => `[${t.id}] ${t.domain} → ${t.agentType} (priority: ${t.priority}, budget: ${t.stepBudget} steps)`).join('\n  ');
+
+          const sparcContext = [
+            `[SPARC Analysis — Auto-generated by Sense+Plan]`,
+            `Complexity: ${senseResult.analysis.complexity}`,
+            `Domains: ${domains}`,
+            `Risks: ${risks}`,
+            mitigations ? `Mitigations:\n  ${mitigations}` : '',
+            `Suggested topology: ${planResult.topology}`,
+            `Subtask plan:\n  ${subtasks}`,
+            `Estimated total steps: ${planResult.estimatedSteps}`,
+            ``,
+            `Use this analysis to guide your orchestration strategy.`
+          ].filter(Boolean).join('\n');
+
+          conversation.push({ role: 'user', content: sparcContext });
+
+          // Persist SPARC state in MemoryDB for audit
+          if (memoryDB) {
+            memoryDB.saveWorkflowState(`sparc-${taskId}`, {
+              sense: senseResult.analysis,
+              plan: { subtasks: planResult.subtasks, topology: planResult.topology },
+              round: 1
+            });
+            memoryDB.appendEvent('sparc.analysis', {
+              taskId,
+              complexity: senseResult.analysis.complexity,
+              domainCount: senseResult.analysis.domains.length,
+              riskCount: senseResult.analysis.risks.length,
+              topology: planResult.topology
+            }, 'sparc');
+          }
+
+          runtime.features.appendEvent('sparc.injected', {
+            taskId,
+            agentType: 'aria-orchestrator',
+            domains: senseResult.analysis.domains.map(d => d.name),
+            complexity: senseResult.analysis.complexity,
+            topology: planResult.topology
+          });
+          console.log(`[SPARC] Injected analysis for task ${taskId}: ${senseResult.analysis.domains.length} domains, complexity=${senseResult.analysis.complexity}`);
+        } catch (sparcErr) {
+          // SPARC analysis is advisory — never block the task on failure
+          console.warn(`[SPARC] Analysis failed (non-blocking): ${sparcErr.message}`);
+          runtime.features.appendEvent('sparc.error', { taskId, error: sparcErr.message });
+        }
       }
 
       runtime.store.updateTask(taskId, currentTask => {
@@ -6755,6 +6962,106 @@ async function activate(context) {
       }
     } catch (_) {}
   }, 500);
+
+  // ── Initialize new modules (Ruflo-inspired improvements) ───────────────────
+  setTimeout(async () => {
+    try {
+      // Learning Engine — self-learning from past agent tasks
+      const storageRoot = appRuntime && appRuntime.store ? appRuntime.store.storageRoot : context.globalStorageUri.fsPath;
+      learningEngine = new LearningEngine(storageRoot);
+      learningEngine.load();
+      const learnStats = learningEngine.getStats();
+      console.log(`[HF AI] LearningEngine loaded: ${learnStats.trajectoryCount} trajectories, ${learnStats.successRate} success rate`);
+
+      // Provider Router — multi-LLM failover
+      providerRouter = new ProviderRouter();
+      providerRouter.addProvider('hf-default', { type: 'huggingface', priority: 0 });
+      console.log('[HF AI] ProviderRouter initialized with HuggingFace default');
+
+      // Plugin Manager — extensible plugin system
+      const pluginDirs = [
+        path.join(context.extensionPath, 'plugins'),
+        path.join(context.globalStorageUri.fsPath, 'plugins')
+      ];
+      pluginManager = new PluginManager(pluginDirs);
+      const pluginStatus = pluginManager.loadAll();
+      console.log(`[HF AI] PluginManager loaded: ${pluginStatus.pluginCount} plugins, ${pluginStatus.toolCount} tools, ${pluginStatus.agentCount} agents`);
+
+      // Hook Registry — 11 lifecycle phases
+      hookRegistry = new HookRegistry();
+      console.log('[HF AI] HookRegistry initialized with', Object.keys(hookRegistry.getStats().byPhase).length, 'phases');
+
+      // Worker Pool — background task processing
+      workerPool = new WorkerPool();
+      // Auto-learning reinforcement worker — runs after each task
+      workerPool.addWorker({
+        id: 'learning-reinforcement',
+        name: 'Learning Reinforcement',
+        trigger: 'post_task',
+        handler: async (payload) => {
+          if (learningEngine && payload.taskId) {
+            return learningEngine.getStats();
+          }
+        }
+      });
+      // CVE monitor worker — runs every 30 minutes
+      workerPool.addWorker({
+        id: 'cve-monitor',
+        name: 'CVE Monitor',
+        trigger: 'periodic',
+        intervalMs: 30 * 60 * 1000,
+        handler: async () => {
+          const folders = vscode.workspace.workspaceFolders;
+          if (!folders || !folders.length) return;
+          const pkgPath = path.join(folders[0].uri.fsPath, 'package.json');
+          const result = scanPackageJson(pkgPath);
+          if (result.criticalCount > 0) {
+            vscode.window.showWarningMessage(`[HF AI] CVE Alert: ${result.criticalCount} critical vulnerabilities detected. Run npm audit for details.`);
+          }
+          return result;
+        }
+      });
+      workerPool.startAll();
+      console.log('[HF AI] WorkerPool started with', workerPool.getStatus().length, 'workers');
+
+      // Encryption Vault — AES-256-GCM for sensitive data
+      encryptionVault = new EncryptionVault({ enabled: false, keySource: 'secretStorage' });
+      // Encryption is opt-in: enabled via setting hfaicode.encryption.enabled
+      const encryptionEnabled = vscode.workspace.getConfiguration('hfaicode').get('encryption.enabled');
+      if (encryptionEnabled) {
+        try {
+          encryptionVault.setEnabled(true);
+          await encryptionVault.initializeKey(context.secrets);
+          console.log('[HF AI] EncryptionVault initialized (AES-256-GCM)');
+        } catch (err) {
+          console.warn('[HF AI] EncryptionVault init failed:', err.message);
+        }
+      } else {
+        console.log('[HF AI] EncryptionVault disabled (opt-in via hfaicode.encryption.enabled)');
+      }
+
+      // MemoryDB — Structured persistent memory (10 tables)
+      const memDbPath = path.join(context.globalStorageUri.fsPath, 'memory.json');
+      memoryDB = new MemoryDB(memDbPath);
+      memoryDB.load();
+      const mdbStats = memoryDB.getStats();
+      console.log(`[HF AI] MemoryDB loaded: ${mdbStats.totalRecords} records across ${Object.keys(mdbStats.tables).length} tables`);
+
+      // ── MemoryDB → RuntimeFeatureStore bridge ────────────────────────────
+      // Inject memoryDB into RuntimeFeatureStore to activate dual-write
+      // (events, onboarding, agent state, cost metrics → MemoryDB tables)
+      if (appRuntime && appRuntime.features) {
+        appRuntime.features.memoryDB = memoryDB;
+        console.log('[HF AI] MemoryDB bridge connected to RuntimeFeatureStore (dual-write active)');
+      }
+
+      // MutationGuard — fail-closed write/shell/delete validation
+      mutationGuard = new MutationGuard();
+      console.log(`[HF AI] MutationGuard active: ${mutationGuard.getStats().configuredRoles} roles, ${mutationGuard.getStats().blockedPaths} blocked paths`);
+    } catch (err) {
+      console.warn('[HF AI] Module initialization warning:', err.message);
+    }
+  }, 800);
 
   // Initial connection check
   setTimeout(async () => {

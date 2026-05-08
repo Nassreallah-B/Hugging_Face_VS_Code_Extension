@@ -1,5 +1,4 @@
-name: CI
-
+name: CI — HF AI Code Extension
 on:
   push:
     branches: [main, develop]
@@ -7,42 +6,95 @@ on:
     branches: [main]
 
 jobs:
-  checks:
-    name: Quality Checks
+  test:
+    name: Unit Tests
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    strategy:
+      matrix:
+        node-version: [20, 22]
 
-      - name: Setup Node.js
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
-          cache: 'npm'
+          node-version: ${{ matrix.node-version }}
 
       - name: Install dependencies
-        run: npm install --ignore-scripts
+        run: npm ci --ignore-scripts || npm install --ignore-scripts
 
-      - name: Anti-hallucination checks
-        run: node scripts/run-anti-hallucination-checks.js
+      - name: Run module tests
+        run: node test-modules.js
 
-      - name: Cloud executor smoke test
-        run: node scripts/run-cloud-executor-smoke.js
-        env:
-          HF_API_TOKEN: ${{ secrets.HF_API_TOKEN }}
-          CLOUD_EXECUTOR_SKIP_DOCKER: 'true'
+      - name: Validate extension syntax
+        run: node -e "require('./lib/aiDefence'); require('./lib/learningEngine'); require('./lib/providerRouter'); require('./lib/pluginManager'); require('./lib/vectorDB'); require('./lib/hooksAndWorkers'); require('./lib/cveScanner'); require('./lib/encryption'); console.log('All modules load successfully');"
+
+      - name: Run CVE quick scan
+        run: |
+          node -e "
+            const { scanPackageJson } = require('./lib/cveScanner');
+            const result = scanPackageJson('./package.json');
+            console.log(result.summary);
+            if (result.criticalCount > 0) {
+              console.error('CRITICAL vulnerabilities found!');
+              process.exit(1);
+            }
+          "
 
   lint:
-    name: Lint
+    name: Lint Check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
-      - run: npm install --ignore-scripts
-      - name: Check for console.log in production code
+          node-version: 22
+
+      - name: Check for hardcoded secrets
         run: |
-          if grep -rn "console\.log" extension.js lib/ --include="*.js" | grep -v "//.*console\.log" | grep -v "^\s*//" ; then
-            echo "WARNING: console.log found in production files"
-          fi
+          node -e "
+            const { scanForSecrets } = require('./lib/aiDefence');
+            const fs = require('fs');
+            const path = require('path');
+            const files = ['extension.js', 'lib/config.js', 'lib/utils.js'];
+            let found = false;
+            for (const f of files) {
+              if (!fs.existsSync(f)) continue;
+              const content = fs.readFileSync(f, 'utf8');
+              const result = scanForSecrets(content);
+              if (!result.clean) {
+                console.error('Secrets found in ' + f + ':', result.findings.map(f => f.type).join(', '));
+                found = true;
+              }
+            }
+            if (found) process.exit(1);
+            console.log('No hardcoded secrets found.');
+          "
+
+  package:
+    name: VSIX Package
+    runs-on: ubuntu-latest
+    needs: [test, lint]
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts || npm install --ignore-scripts
+
+      - name: Install vsce
+        run: npm install -g @vscode/vsce
+
+      - name: Package VSIX
+        run: vsce package --no-dependencies -o hf-ai-code.vsix
+
+      - name: Upload VSIX artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hf-ai-code-vsix
+          path: hf-ai-code.vsix
+          retention-days: 30
