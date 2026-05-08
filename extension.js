@@ -243,12 +243,24 @@ let _apiTokenCache = '';
 // Chargement initial depuis SecretStorage (appelé une fois dans activate)
 async function loadApiTokenCache() {
   try {
-    if (extensionContext) {
-      const stored = await extensionContext.secrets.get('hfaicode.apiToken');
-      if (stored) { _apiTokenCache = stored; return; }
+    const fromCfg = cfg('apiToken') || '';
+    const fromSecret = extensionContext ? (await extensionContext.secrets.get('hfaicode.apiToken')) || '' : '';
+
+    // settings.json always wins — user can edit it directly
+    if (fromCfg && fromCfg.startsWith('hf_')) {
+      _apiTokenCache = fromCfg;
+      // Sync SecretStorage if it differs
+      if (extensionContext && fromCfg !== fromSecret) {
+        await extensionContext.secrets.store('hfaicode.apiToken', fromCfg);
+        console.log('[HF AI] Token synced from settings.json to SecretStorage');
+      }
+      return;
     }
-    // Fallback legacy config
-    _apiTokenCache = cfg('apiToken') || '';
+    // Fallback to SecretStorage if settings.json is empty
+    if (fromSecret && fromSecret.startsWith('hf_')) {
+      _apiTokenCache = fromSecret;
+      return;
+    }
   } catch (_) {
     _apiTokenCache = cfg('apiToken') || '';
   }
@@ -256,7 +268,9 @@ async function loadApiTokenCache() {
 
 // Lecture synchrone du token — utilisée partout dans le code
 function getApiToken() {
-  return _apiTokenCache || cfg('apiToken') || '';
+  // If cache is empty or looks invalid, try settings.json directly
+  if (!_apiTokenCache) return cfg('apiToken') || '';
+  return _apiTokenCache;
 }
 
 // Écriture sécurisée dans SecretStorage + mise à jour du cache
@@ -6283,12 +6297,12 @@ class HFChatViewProvider {
 
   async _selectModel() {
     const popularModels = [
+      'deepseek-ai/DeepSeek-V4-Pro',
+      'google/gemma-3n-E4B-it:together',
       'Qwen/Qwen3.5-397B-A17B:fastest',
       'Qwen/Qwen2.5-Coder-32B-Instruct:fastest',
-      'Qwen/Qwen2.5-7B-Instruct-1M:fastest',
       'deepseek-ai/DeepSeek-R1:fastest',
       'zai-org/GLM-4.5:fastest',
-      'openai/gpt-oss-120b:fastest',
       'Qwen/Qwen3-Coder-480B-A35B-Instruct:fastest'
     ];
 
@@ -7138,6 +7152,35 @@ async function activate(context) {
         vscode.window.showInformationMessage(`Memory scope changed to "${newScope}": ${explanation}`);
         if (chatProvider && chatProvider.syncState) await chatProvider.syncState();
       }
+    }
+    // React to model changes from settings UI
+    if (event.affectsConfiguration('hfaicode.modelId')) {
+      const newModel = getModelId();
+      console.log(`[HF AI] Model changed to: ${newModel}`);
+      vscode.window.showInformationMessage(`Model changed to: ${newModel}`);
+      if (chatProvider) {
+        chatProvider._post({ type: 'checking' });
+        await chatProvider._doCheckConnection();
+      }
+    }
+    // React to token changes from settings UI
+    if (event.affectsConfiguration('hfaicode.apiToken')) {
+      await loadApiTokenCache();
+      console.log('[HF AI] API token updated from settings');
+      if (chatProvider) {
+        chatProvider._post({ type: 'checking' });
+        await chatProvider._doCheckConnection();
+      }
+    }
+    // React to module toggle changes — sync the UI
+    if (event.affectsConfiguration('hfaicode.defence') ||
+        event.affectsConfiguration('hfaicode.guard') ||
+        event.affectsConfiguration('hfaicode.sparc') ||
+        event.affectsConfiguration('hfaicode.cve') ||
+        event.affectsConfiguration('hfaicode.plugins') ||
+        event.affectsConfiguration('hfaicode.memorydb') ||
+        event.affectsConfiguration('hfaicode.encryption')) {
+      if (chatProvider && chatProvider.syncState) await chatProvider.syncState();
     }
   });
   context.subscriptions.push(configListener);
